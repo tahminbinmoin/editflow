@@ -72,7 +72,7 @@ export default function Dashboard() {
               {engine?.id === 'rules' ? (
                 <>
                   First cuts use the rule-based drafter (no AI).{' '}
-                  <Link to="/app/settings">Connect FreeLLMAPI or another provider</Link> for AI story planning.
+                  <Link to="/app/settings">Connect ChatGPT or Claude</Link> for AI story planning and video analysis.
                 </>
               ) : (
                 <>AI story planning via {engine?.name}.</>

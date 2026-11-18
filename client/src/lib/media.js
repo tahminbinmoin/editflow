@@ -3,6 +3,7 @@
 import { supabase, SUPABASE_URL, SUPABASE_KEY, accessToken } from './supabase.js';
 import { MEDIA_BUCKET, MAX_UPLOAD_MB } from '@shared/config.js';
 import { localUrl, getLocalFile } from './localFolder.js';
+import { layout as layoutForFrames } from '@shared/timeline.js';
 
 const loadEl = (src, tag) =>
   new Promise((resolve, reject) => {
@@ -282,4 +283,64 @@ export async function assetBlob(asset, urls) {
   const url = urls[asset.id]?.file;
   if (!url) throw new Error(`Could not open ${asset.name}.`);
   return (await fetch(url)).blob();
+}
+
+/**
+ * Still frames from one video as base64 JPEGs (for AI video analysis). Seeks a hidden video
+ * element through `times` (seconds in that file); frames that can't be read are skipped.
+ */
+export async function grabFrames(src, times, { maxSide = 448, quality = 0.72 } = {}) {
+  const v = await loadEl(src, 'video');
+  try {
+    if (!v.videoWidth) await new Promise((r) => ((v.onloadeddata = r), setTimeout(r, 3000)));
+    const scale = Math.min(1, maxSide / Math.max(v.videoWidth || 1, v.videoHeight || 1));
+    const c = document.createElement('canvas');
+    c.width = Math.max(2, Math.round((v.videoWidth * scale) / 2) * 2);
+    c.height = Math.max(2, Math.round((v.videoHeight * scale) / 2) * 2);
+    const ctx = c.getContext('2d');
+    const out = [];
+    for (const t of times) {
+      await Promise.race([seek(v, t), new Promise((r) => setTimeout(r, 4000))]);
+      try {
+        ctx.drawImage(v, 0, 0, c.width, c.height);
+        out.push({ t, data: c.toDataURL('image/jpeg', quality).split(',')[1] });
+      } catch {
+        out.push({ t, data: null });
+      }
+    }
+    return out;
+  } finally {
+    release(v);
+  }
+}
+
+/** Frames across the current cut (timeline times) plus one frame per B-roll library clip. */
+export async function sampleCut(project, urls, timeline, onStatus) {
+  const { clips, duration } = layoutForFrames(timeline);
+  const n = Math.max(6, Math.min(20, Math.round(duration / 2.5)));
+  const wanted = Array.from({ length: n }, (_, k) => +(((k + 0.5) * duration) / n).toFixed(2));
+  const byAsset = new Map();
+  for (const t of wanted) {
+    const c = clips.find((k) => t >= k.tlStart && t < k.tlEnd) || clips[clips.length - 1];
+    const a = project.assets.find((x) => x.id === c.assetId);
+    if (!a?.hasVideo || !urls[a.id]?.file) continue;
+    if (!byAsset.has(a.id)) byAsset.set(a.id, []);
+    byAsset.get(a.id).push({ tl: t, src: c.in + (t - c.tlStart) });
+  }
+  const frames = [];
+  for (const [aid, list] of byAsset) {
+    onStatus?.(`Reading frames (${frames.length}/${wanted.length})…`);
+    const got = await grabFrames(urls[aid].file, list.map((x) => x.src)).catch(() => []);
+    got.forEach((g, i) => g.data && frames.push({ t: list[i].tl, data: g.data }));
+  }
+  frames.sort((a, b) => a.t - b.t);
+  const libraryAssets = project.assets.filter((a) => a.kind === 'broll' && a.status === 'ready' && a.hasVideo !== false).slice(0, 12);
+  const library = [];
+  for (const [i, a] of libraryAssets.entries()) {
+    if (!urls[a.id]?.file) continue;
+    onStatus?.(`Reading your B-roll (${i + 1}/${libraryAssets.length})…`);
+    const [g] = await grabFrames(urls[a.id].file, [Math.max(0, (a.duration || 2) * 0.4)], { maxSide: 320 }).catch(() => []);
+    if (g?.data) library.push({ label: `B${i + 1}`, data: g.data });
+  }
+  return { frames, library };
 }

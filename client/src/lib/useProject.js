@@ -4,8 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api.js';
 import { currentUser } from './supabase.js';
 import * as store from './store.js';
-import { assetUrls, probeFile, decodeAudio, peaksFrom, silencesFrom, thumbnailFrom, analyzeReference, speechWav, uploadToStorage } from './media.js';
-import { transcribeLocally } from './localWhisper.js';
+import { assetUrls, assetBlob, probeFile, decodeAudio, peaksFrom, silencesFrom, thumbnailFrom, analyzeReference, speechWav, uploadToStorage, sampleCut } from './media.js';
 import * as folder from './localFolder.js';
 import { useToast } from '../components/ui.jsx';
 import { useAuth } from '../App.jsx';
@@ -137,10 +136,11 @@ export function useProject(id) {
     [commit, setProject, toast],
   );
 
-  const needsConsent = (providerId, name, dataUse) => {
+  const needsConsent = (providerId, name, dataUse, kind = 'transcript') => {
     if (ref.current.consent?.[providerId]?.allowed) return false;
-    throw Object.assign(new Error('Consent needed'), { code: 'consent_required', provider: { id: providerId, name, dataUse } });
+    throw Object.assign(new Error('Consent needed'), { code: 'consent_required', provider: { id: providerId, name, dataUse, kind } });
   };
+  const [status, setStatus] = useState(null); // progress text for long AI actions
 
   const act = useMemo(
     () => ({
@@ -221,11 +221,44 @@ export function useProject(id) {
           });
           return true;
         }),
+      /** Send still frames of the cut to ChatGPT/Claude → proposal of B-roll + motion graphics. */
+      analyzeVisuals: () =>
+        run('visuals', async () => {
+          const p = ref.current;
+          if (!engine || engine.id === 'rules') throw new Error('Video analysis needs ChatGPT or Claude. Connect one in AI settings.');
+          if (!p.timeline.clips.length) throw new Error('Make a first cut before analysing the video.');
+          needsConsent(`${engine.id}:frames`, engine.name, engine.dataUse, 'frames');
+          try {
+            setStatus('Reading frames from your cut…');
+            const { frames, library } = await sampleCut(p, urls, normalizeTimeline(p.timeline), setStatus);
+            if (frames.length < 2) throw new Error('Could not read frames from the footage. Check that it plays in the preview (and that its folder is connected).');
+            setStatus(`${engine.name} is looking at ${frames.length} frames${library.length ? ` and ${library.length} B-roll clips` : ''}…`);
+            const { meta, ...out } = await api('/ai/visuals', { method: 'POST', body: { projectId: p.id, frames, library } });
+            const res = applyOps(p.timeline, out.ops || [], { assets: p.assets });
+            const notes = [...(out.notes || []), ...res.errors.map((e) => `Skipped one step: ${e.error}`)];
+            const now = new Date().toISOString();
+            if (!res.applied.length) {
+              await mutate((d) => d.chat.push({ role: 'assistant', text: out.summary || 'No visual changes proposed.', notes, at: now, meta }));
+              throw new Error(`${engine.name} didn’t propose any B-roll or graphics for this cut.`);
+            }
+            const steps = res.applied.filter((o) => o.type !== 'deleteBroll').map((o) => describeOp(o, p.timeline));
+            const removed = res.applied.filter((o) => o.type === 'deleteBroll').length;
+            if (removed) steps.push(`Replace ${removed} earlier B-roll idea${removed === 1 ? '' : 's'} without footage`);
+            const pending = { id: uid('prop'), kind: 'visuals', summary: out.summary, scenes: out.scenes || [], steps, ops: res.applied, notes, timeline: res.timeline, changes: diffSummary(p.timeline, res.timeline), meta, createdAt: now };
+            await mutate((d) => {
+              d.pending = pending;
+              d.chat.push({ role: 'assistant', text: pending.summary, notes, at: now, meta, proposalId: pending.id });
+            });
+            return true;
+          } finally {
+            setStatus(null);
+          }
+        }),
       applyPending: () =>
         run('apply', async () => {
           const pend = ref.current.pending;
           if (!pend) return;
-          const label = pend.kind === 'firstCut' ? `${pend.meta.engine === 'rules' ? 'Rule-based' : 'AI'} first cut` : `AI: ${pend.request}`.slice(0, 90);
+          const label = pend.kind === 'firstCut' ? `${pend.meta.engine === 'rules' ? 'Rule-based' : 'AI'} first cut` : pend.kind === 'visuals' ? 'AI: B-roll and motion graphics' : `AI: ${pend.request}`.slice(0, 90);
           await commit(normalizeTimeline(pend.timeline), label, pend.meta.engine === 'rules' ? 'rules' : 'ai', (p) => {
             if (pend.kind === 'firstCut') p.plan = pend.plan;
             const m = p.chat.find((c) => c.proposalId === pend.id);
@@ -402,31 +435,30 @@ export function useProject(id) {
           const s = p.transcript.segments.find((x) => x.id === sid);
           if (s) s.text = String(text).slice(0, 600);
         }),
-      transcribeGroq: (assetId) =>
+      /** OpenAI speech-to-text: the audio track (16 kHz mono WAV) goes to Storage, the API splits it at pauses and transcribes each part. */
+      transcribe: (assetId) =>
         run('transcribing', async () => {
-          needsConsent('groq', 'Groq Whisper', 'The audio track of this file (not the video) is uploaded to Groq for transcription.');
+          needsConsent('openai:audio', 'ChatGPT (OpenAI)', 'OpenAI states that API data is not used to train its models by default.', 'audio');
           const a = ref.current.assets.find((x) => x.id === assetId);
-          const blob = await (await fetch(urls[assetId]?.file)).blob();
-          const buf = await decodeAudio(blob);
-          if (!buf) throw new Error('Could not read the audio in this file.');
-          const wav = await speechWav(buf);
-          if (wav.size > 25 * 1024 * 1024) throw new Error('This clip is longer than about 13 minutes, which is over Groq’s 25 MB free-plan limit. Trim it or import a caption file.');
-          const user = await currentUser();
-          const path = await uploadToStorage(`${user.id}/${id}/${a.id}/speech.wav`, wav, null, 'audio/wav');
-          const out = await api('/transcribe/groq', { method: 'POST', body: { projectId: id, assetId, path } });
-          let count = 0;
-          await mutate((p) => {
-            count = setAssetSegments(p.transcript, assetId, out.segments || [], 'groq-whisper');
-            p.transcript.language = out.language || p.transcript.language;
-          });
-          toast(`Transcribed ${count} lines with Groq Whisper`);
+          try {
+            setStatus('Reading the audio…');
+            const buf = await decodeAudio(await assetBlob(a, urls));
+            if (!buf) throw new Error('Could not read the audio in this file.');
+            const wav = await speechWav(buf);
+            if (wav.size > 48 * 1024 * 1024) throw new Error('This clip is longer than about 25 minutes. Trim it, or import a caption file.');
+            setStatus('Uploading the audio…');
+            const user = await currentUser();
+            const path = await uploadToStorage(`${user.id}/${id}/${a.id}/speech.wav`, wav, null, 'audio/wav');
+            setStatus('Transcribing with OpenAI…');
+            const out = await api('/transcribe/openai', { method: 'POST', body: { projectId: id, assetId, path } });
+            if (!out.segments?.length) throw new Error('No speech was found in this file.');
+            let count = 0;
+            await mutate((p) => (count = setAssetSegments(p.transcript, assetId, out.segments, 'openai-transcribe')));
+            toast(`Transcribed ${count} lines with OpenAI`);
+          } finally {
+            setStatus(null);
+          }
         }),
-      transcribeLocal: async (assetId, onStatus) => {
-        const segments = await transcribeLocally(urls[assetId]?.file, onStatus);
-        if (!segments.length) throw new Error('No speech was detected.');
-        await mutate((p) => setAssetSegments(p.transcript, assetId, segments, 'local-whisper'));
-        return segments.length;
-      },
 
       // ----- exports -----
       recordExport: (rec) =>
@@ -446,5 +478,5 @@ export function useProject(id) {
     c.retry();
   }, [consent, act]);
 
-  return { project, error, busy, urls, folders, ops, act, consent, allowConsent, cancelConsent: () => setConsent(null) };
+  return { project, error, busy, status, urls, folders, ops, act, consent, allowConsent, cancelConsent: () => setConsent(null) };
 }

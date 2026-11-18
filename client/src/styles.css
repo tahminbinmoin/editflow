@@ -199,6 +199,7 @@ input[type='range'] { accent-color: var(--accent); width: 100%; }
 .frame { position: relative; background: #000; border-radius: 10px; overflow: hidden; box-shadow: 0 10px 40px rgba(0, 0, 0, .5); max-height: 100%; max-width: 100%; }
 .frame video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .frame .layer { position: absolute; inset: 0; pointer-events: none; }
+.frame .gfx-layer { position: absolute; inset: 0; pointer-events: none; }
 .cap-preview { position: absolute; left: 8%; right: 8%; text-align: center; font-family: 'Inter Variable'; font-weight: 800; line-height: 1.2; }
 .cap-bold { color: #fff; text-shadow: 0 0 2px #000, 0 0 2px #000, 0 0 3px #000, 0 0 4px #000; }
 .cap-clean { color: #fff; font-weight: 700; text-shadow: 0 2px 6px rgba(0, 0, 0, .7); }
@@ -242,6 +243,8 @@ input[type='range'] { accent-color: var(--accent); width: 100%; }
 .tl-chip { position: absolute; top: 6px; bottom: 6px; border-radius: 6px; font-size: 11px; font-weight: 600; padding: 0 7px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; cursor: grab; border: 1.5px solid transparent; }
 .tl-chip.sel { border-color: var(--text); }
 .tl-chip.text { background: rgba(255, 91, 58, .25); color: #ffd3c8; }
+.tl-chip.gfx { background: rgba(143, 183, 255, .2); color: #cfe0ff; }
+.tl-chip.gfx .sw { width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; flex: none; }
 .tl-chip.broll { background: rgba(243, 183, 94, .18); color: var(--warm); }
 .tl-chip.broll.empty { background: transparent; border: 1.5px dashed rgba(243, 183, 94, .6); }
 .tl-chip.cap { background: rgba(245, 240, 233, .08); color: var(--text-2); cursor: pointer; font-weight: 500; }

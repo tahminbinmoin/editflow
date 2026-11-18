@@ -2,9 +2,11 @@
 // that the tests run with native ffmpeg produces the filter graph here.
 import { FFmpeg, FFFSType } from '@ffmpeg/ffmpeg';
 import { toBlobURL, fetchFile } from '@ffmpeg/util';
-import { buildRenderPlan } from '@shared/render-graph.js';
+import { buildRenderPlan, dimensions } from '@shared/render-graph.js';
 import { parseProbe } from '@shared/probe.js';
 import { assetBlob } from './media.js';
+import { writeGraphicFrames } from './graphicsFrames.js';
+import { normalizeTimeline, totalDuration } from '@shared/timeline.js';
 
 let ffPromise = null;
 let sink = null; // current log collector
@@ -76,7 +78,14 @@ export async function renderVideo(project, urls, { aspect, quality }, onProgress
       throw new Error(`${a.name} could not be read by the video engine.`);
     }
   }
-  const plan = buildRenderPlan(project, { ...opts, media });
+  const tl = normalizeTimeline(project.timeline);
+  let graphics = [];
+  if (tl.graphics.length) {
+    const { W, H } = dimensions(aspect, quality);
+    onProgress?.({ step: 'Drawing motion graphics…', progress: 0 });
+    graphics = await writeGraphicFrames(ff, tl.graphics, totalDuration(tl), W, H, '/', (p) => onProgress?.({ step: `Drawing motion graphics (${Math.round(p * 100)}%)…`, progress: 0 }));
+  }
+  const plan = buildRenderPlan(project, { ...opts, media, graphics });
   await ff.writeFile(plan.assName, plan.ass);
   await ff.writeFile(plan.listName, plan.list);
 
@@ -114,7 +123,7 @@ export async function renderVideo(project, urls, { aspect, quality }, onProgress
     const data = await ff.readFile('/out.mp4');
     return { blob: new Blob([data], { type: 'video/mp4' }), duration: plan.duration, W: plan.W, H: plan.H, seconds: Math.round((performance.now() - started) / 1000) };
   } finally {
-    for (const f of [...plan.segments.map((sg) => sg.out), '/out.mp4', plan.listName, plan.assName]) await ff.deleteFile(f).catch(() => {});
+    for (const f of [...plan.segments.map((sg) => sg.out), '/out.mp4', plan.listName, plan.assName, ...graphics.flatMap((g) => g.files)]) await ff.deleteFile(f).catch(() => {});
     await ff.unmount('/in').catch(() => {});
   }
 }

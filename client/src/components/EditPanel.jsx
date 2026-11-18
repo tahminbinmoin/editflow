@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Scissors, Trash2, Type, Clapperboard, ChevronLeft } from 'lucide-react';
+import { Scissors, Trash2, Type, Clapperboard, ChevronLeft, Sparkles } from 'lucide-react';
 import { layout, timelineCaptions, formatTime, TRANSITIONS, OVERLAY_TEMPLATES, CAPTION_STYLES, STORY_ROLES, ASPECTS } from '@shared/timeline.js';
+import { GRAPHIC_TYPES, GRAPHIC_COLORS, GRAPHIC_POSITIONS } from '@shared/graphics.js';
+
+const SAMPLE_TEXT = { lowerThird: ['Your name', 'What you do'], keyword: ['Key point'], stat: ['73%', 'what the number means'], list: ['What you need'], callout: ['Look here'], progress: [''], chapter: ['Section title', 'Step 1'] };
+export function newGraphic(type, start, duration) {
+  const [text, sub] = SAMPLE_TEXT[type] || [''];
+  return { type, text, sub: sub || '', items: type === 'list' ? ['First point', 'Second point', 'Third point'] : [], start: +start.toFixed(2), ...(duration ? { duration } : {}) };
+}
 
 /** Number input that commits on blur/Enter (so each edit is one history step). */
 function Num({ value, onCommit, step = 0.1, min, max, label, suffix = 's' }) {
@@ -172,6 +179,89 @@ export default function EditPanel({ project, timeline, selection, onSelect, ops,
     );
   }
 
+  if (selection?.type === 'graphic') {
+    const g = (timeline.graphics || []).find((k) => k.id === selection.id);
+    if (!g) return back;
+    const def = GRAPHIC_TYPES[g.type];
+    const up = (patch, label) => ops([{ type: 'updateGraphic', graphicId: g.id, patch }], label || 'Edit motion graphic');
+    const total = layout(timeline).duration;
+    return (
+      <div className="stack">
+        {back}
+        <h3 style={{ fontSize: 18 }}>Motion graphic</h3>
+        {g.reason && <div className="notice info">Why: {g.reason}</div>}
+        <div className="field">
+          <label>Type</label>
+          <select className="select sm" value={g.type} onChange={(e) => up({ type: e.target.value }, 'Change graphic type')}>
+            {Object.entries(GRAPHIC_TYPES).map(([k, t]) => (
+              <option key={k} value={k}>
+                {t.label}: {t.desc}
+              </option>
+            ))}
+          </select>
+        </div>
+        {def.fields.includes('text') && <Txt label={def.textLabel || 'Text'} value={g.text} onCommit={(v) => up({ text: v })} />}
+        {def.fields.includes('sub') && <Txt label={def.subLabel || 'Second line'} value={g.sub} onCommit={(v) => up({ sub: v })} />}
+        {def.fields.includes('items') && (
+          <Txt area label="Points (one per line, up to 4)" value={g.items.join('\n')} onCommit={(v) => up({ items: v.split('\n') }, 'Edit checklist')} />
+        )}
+        {def.fields.includes('point') && (
+          <div className="card tight stack-sm">
+            <div className="section-title">Points at</div>
+            <label className="label">Across · {Math.round(g.x * 100)}%</label>
+            <input type="range" min={4} max={96} defaultValue={Math.round(g.x * 100)} key={`x${g.id}${g.x}`} onMouseUp={(e) => up({ x: Number(e.target.value) / 100 }, 'Move callout')} onKeyUp={(e) => up({ x: Number(e.target.value) / 100 }, 'Move callout')} aria-label="Callout across" />
+            <label className="label">Down · {Math.round(g.y * 100)}%</label>
+            <input type="range" min={4} max={96} defaultValue={Math.round(g.y * 100)} key={`y${g.id}${g.y}`} onMouseUp={(e) => up({ y: Number(e.target.value) / 100 }, 'Move callout')} onKeyUp={(e) => up({ y: Number(e.target.value) / 100 }, 'Move callout')} aria-label="Callout down" />
+          </div>
+        )}
+        <div className="field">
+          <label>Colour</label>
+          <div className="row wrap">
+            {Object.entries(GRAPHIC_COLORS).map(([k, c]) => (
+              <button key={k} className={`btn xs ${g.color === k ? 'primary' : ''}`} onClick={() => up({ color: k }, 'Graphic colour')} title={c.label}>
+                <span style={{ width: 10, height: 10, borderRadius: 3, background: c.hex, display: 'inline-block', border: '1px solid rgba(0,0,0,.3)' }} /> {c.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {g.type !== 'callout' && (
+          <div className="field">
+            <label>Position</label>
+            <div className="row">
+              {Object.entries(GRAPHIC_POSITIONS)
+                .filter(([k]) => g.type !== 'progress' || k !== 'center')
+                .map(([k, l]) => (
+                  <button key={k} className={`btn xs ${g.position === k ? 'primary' : ''}`} onClick={() => up({ position: k }, 'Graphic position')}>
+                    {l}
+                  </button>
+                ))}
+            </div>
+          </div>
+        )}
+        <div className="row">
+          <Num label="Starts at" value={g.start} min={0} onCommit={(v) => up({ start: v }, 'Move motion graphic')} />
+        </div>
+        <div className="row">
+          <Num label="Duration" value={g.duration} min={0.6} onCommit={(v) => up({ duration: v }, 'Graphic duration')} />
+        </div>
+        {g.type === 'progress' && total > 0 && (
+          <button className="btn sm" onClick={() => up({ start: 0, duration: total }, 'Progress bar spans the video')}>
+            Span the whole video ({formatTime(total)})
+          </button>
+        )}
+        <button
+          className="btn sm danger"
+          onClick={() => {
+            ops([{ type: 'deleteGraphic', graphicId: g.id }], 'Remove motion graphic');
+            onSelect(null);
+          }}
+        >
+          <Trash2 size={14} /> Remove graphic
+        </button>
+      </div>
+    );
+  }
+
   if (selection?.type === 'broll') {
     const b = timeline.broll.find((k) => k.id === selection.id);
     if (!b) return back;
@@ -242,7 +332,7 @@ export default function EditPanel({ project, timeline, selection, onSelect, ops,
   // Nothing selected: project-level basics first, advanced tucked away.
   return (
     <div className="stack">
-      <p className="small muted">Select a clip, text, B-roll or caption on the timeline to edit it. Drag clips to reorder, and drag the white handles to trim.</p>
+      <p className="small muted">Select a clip, graphic, text, B-roll or caption on the timeline to edit it. Drag clips to reorder, and drag the white handles to trim.</p>
       <div className="card tight stack-sm">
         <div className="section-title">Captions</div>
         <label className="check">
@@ -279,6 +369,23 @@ export default function EditPanel({ project, timeline, selection, onSelect, ops,
             </div>
           </details>
         )}
+      </div>
+
+      <div className="card tight stack-sm">
+        <div className="section-title">Motion graphics</div>
+        <div className="row wrap">
+          {Object.entries(GRAPHIC_TYPES).map(([k, t]) => (
+            <button
+              key={k}
+              className="btn xs"
+              title={t.desc}
+              onClick={() => ops([{ type: 'addGraphic', graphic: newGraphic(k, k === 'progress' ? 0 : time, k === 'progress' ? layout(timeline).duration || undefined : undefined) }], `Add ${t.label.toLowerCase()}`)}
+            >
+              <Sparkles size={12} /> {t.label}
+            </button>
+          ))}
+        </div>
+        <p className="tiny muted">Animated, and exported exactly as previewed. Added at the playhead ({formatTime(time)}); select one on the timeline to edit it.</p>
       </div>
 
       <div className="card tight stack-sm">

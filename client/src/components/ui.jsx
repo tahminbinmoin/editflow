@@ -88,7 +88,6 @@ export function EngineBadge({ meta }) {
   return (
     <span className="pill info" title={meta.usage ? `${meta.usage.input ?? '?'} in / ${meta.usage.output ?? '?'} out tokens` : ''}>
       AI · {meta.routedVia || meta.model || meta.providerName}
-      {meta.provider === 'freellmapi' ? ' via FreeLLMAPI' : ''}
     </span>
   );
 }
@@ -97,15 +96,15 @@ export function EngineBadge({ meta }) {
 export function ConsentModal({ request, onAllow, onCancel }) {
   if (!request) return null;
   const p = request.provider || {};
-  const audio = p.id === 'groq';
+  const what = {
+    audio: 'To transcribe, Editflow uploads this file’s audio track (not the picture) as 16 kHz mono audio, split into short parts at pauses.',
+    frames: 'To analyse the video, Editflow sends about 6–20 small still frames from your cut (and one frame of each B-roll clip), the transcript lines with their times, and your brief. The video file itself isn’t uploaded.',
+    transcript: 'To plan the edit, Editflow sends this project’s transcript text, your brief (audience, goal, notes) and any measured reference stats. Your video files are never sent.',
+  }[p.kind || 'transcript'];
   return (
-    <Modal open title={`Send this project to ${p.name}?`} onClose={onCancel}>
+    <Modal open title={`Send ${p.kind === 'frames' ? 'frames from this video' : p.kind === 'audio' ? 'this audio' : 'this project'} to ${p.name}?`} onClose={onCancel}>
       <div className="stack">
-        <p className="text-2">
-          {audio
-            ? 'To transcribe, Editflow uploads a compressed copy of this file’s audio track (not the video) to Groq.'
-            : 'To plan the edit, Editflow sends this project’s transcript text, your brief (audience, goal, notes) and any measured reference stats. Your video files are never sent.'}
-        </p>
+        <p className="text-2">{what}</p>
         <div className="notice warm">{p.dataUse}</div>
         <p className="small muted">This choice is saved for this project only. You can switch to rule-based mode (no AI, nothing sent) in Settings at any time.</p>
         <div className="row" style={{ justifyContent: 'flex-end' }}>

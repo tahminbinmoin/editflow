@@ -150,11 +150,11 @@ export function ruleRefine(project, request) {
     clips.slice(1).forEach((c) => ops.push({ type: 'updateClip', clipId: c.id, patch: { transitionIn: 'fade' } }));
     summary = 'Adds a short fade between clips.';
   } else if (/close.?up|zoom|framing|shot/.test(r)) {
-    notes.push('Detecting close-ups needs visual analysis, which the rule-based mode does not have. Connect an AI provider in Settings for broader requests, or add B-roll shots manually.');
+    notes.push('Detecting close-ups needs visual analysis, which the rule-based mode does not have. Connect ChatGPT or Claude in Settings and use “Analyse video”, or add B-roll shots manually.');
     summary = 'Nothing changed.';
   } else {
     notes.push(
-      'Rule-based mode understands: “make it faster/tighter” (optionally “first 3 seconds”), “music quieter/louder”, “captions off / centered / boxed”, “clean up the audio”, “add fades”. Connect an AI provider in Settings for anything else.',
+      'Rule-based mode understands: “make it faster/tighter” (optionally “first 3 seconds”), “music quieter/louder”, “captions off / centered / boxed”, “clean up the audio”, “add fades”. Connect ChatGPT or Claude in Settings for anything else.',
     );
     summary = 'Nothing changed.';
   }

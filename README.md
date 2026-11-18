@@ -1,6 +1,6 @@
 # Editflow (working name)
 
-Story-first video editing for solo creators and small agencies. Upload a talking-head, podcast or product clip and say who it's for. Editflow drafts an editable first cut with a hook, story structure, captions, B-roll ideas and music direction. You refine it in plain language or with simple controls, then export an MP4.
+Story-first video editing for solo creators and small agencies. Upload a talking-head, podcast or product clip and say who it's for. Editflow drafts an editable first cut with a hook, story structure, captions, B-roll ideas and music direction. ChatGPT or Claude can then look at the video and add B-roll and animated motion graphics. You refine it in plain language or with simple controls, then export an MP4.
 
 **Live:** https://editflow-brown.vercel.app
 
@@ -21,9 +21,9 @@ React app ── sign in ──────────────────�
           ── or read it from a folder on the PC (no upload, any size); exports saved back there
           ── probe, waveform, pauses, thumbnails: in the browser
           ── export: ffmpeg.wasm renders the MP4 on the user's device
-          ── "make a first cut" / "make it faster" ────────────────────────────▶  AI adapters (FreeLLMAPI, OpenAI,
-                                                                                   Claude, Gemini) with the user's
-                                                                                   encrypted keys; Groq Whisper
+          ── first cut / "make it faster" / analyse video (frames) ──────────▶  ChatGPT (OpenAI) or Claude
+                                                                                   (Anthropic) with the user's
+                                                                                   encrypted keys; OpenAI transcription
 ```
 
 Video never passes through the Vercel function, so its 4.5 MB request limit doesn't apply. Uploads go straight to Supabase Storage, and rendering happens in the browser.
@@ -72,41 +72,60 @@ npm run dev      # http://localhost:5173 — the /api function runs inside the d
 
 Local dev uses the same hosted Supabase project by default. Put `EDITFLOW_SECRET=...` in a `.env` file if you want to save AI keys locally.
 
-Tests (no network needed: they use in-memory stand-ins for Supabase and FreeLLMAPI, plus native ffmpeg for the render check):
+Tests (no network needed: they use in-memory stand-ins for Supabase and the OpenAI/Anthropic APIs, plus native ffmpeg for the render check):
 
 ```bash
 npm test
 ```
 
-To run the whole app offline against the stand-ins: `npm run mock:supabase` and `npm run mock:freellmapi`, then start Vite with `VITE_SUPABASE_URL=http://localhost:54321 SUPABASE_URL=http://localhost:54321 npm run dev`.
+To run the whole app offline against the stand-ins: `npm run mock:supabase` and `npm run mock:ai`, then start Vite with `VITE_SUPABASE_URL=http://localhost:54321 SUPABASE_URL=http://localhost:54321 OPENAI_BASE_URL=http://localhost:3999/openai/v1 ANTHROPIC_BASE_URL=http://localhost:3999/anthropic/v1 npm run dev` and use the keys `sk-test` / `sk-ant-test`.
 
 ---
 
-## AI providers
+## AI: ChatGPT and Claude
 
-| Provider | Billing | Notes |
+| Option | Billing | What it does |
 |---|---|---|
-| Rule-based (built in) | Free, no AI | Transparent heuristics; output is always labelled "Rule-based · no AI used". Runs in the browser. |
-| FreeLLMAPI router | Free tiers of keys you add | Self-hosted router ([repo](https://github.com/tashfeenahmed/freellmapi)). On the hosted app it needs a **public https URL**: the app refuses `localhost` and private addresses. Its authors label it for personal experimentation, not production. |
-| OpenAI | Paid API billing | ChatGPT subscriptions are billed separately from the API. |
-| Anthropic (Claude) | Paid API billing | Claude.ai subscriptions are separate from API usage. |
-| Google Gemini | Rate-limited free tier, then paid | Free-tier data may be used to improve Google's products. |
-| Groq Whisper (transcription) | Free plan with limits | 25 MB per file (≈13 min of 16 kHz audio). Only the audio is sent. |
+| Rule-based (built in) | Free, no AI | Transparent heuristics; output is always labelled "Rule-based · no AI used". |
+| ChatGPT (OpenAI API) | Your OpenAI API key, pay per use | First cut, change requests, **video analysis** (still frames → B-roll and motion graphics), **transcription** (`gpt-transcribe`). Default model `gpt-6.2-sol`. |
+| Claude (Anthropic API) | Your Anthropic API key, pay per use | First cut, change requests, **video analysis**. Default model `claude-sonnet-5-5`. Claude doesn't transcribe audio; transcription always uses the OpenAI key. |
 
-Each user adds their own keys in **AI settings**. Keys are encrypted with `EDITFLOW_SECRET` and stored in Supabase; the browser never sees them in plaintext. Editflow asks for consent per project before any transcript or audio leaves the browser.
+**Subscriptions vs API keys.** A ChatGPT Plus/Pro or Claude Pro/Max subscription can't power Editflow:
+- Anthropic's terms don't allow Claude subscription logins in third-party apps.
+- OpenAI's "Sign in with ChatGPT" plan usage is only open to approved partner apps for hosted products. You can apply through OpenAI's interest form.
 
-**Important:** don't put one shared free-tier router behind the public app for everyone. Provider free tiers generally forbid sharing access, and FreeLLMAPI is labelled not for production. For real customers, use paid keys under the providers' commercial terms.
+Until then, each user adds an API key from platform.openai.com or console.anthropic.com in **AI settings**. Keys are encrypted with `EDITFLOW_SECRET` and stored in Supabase; the browser never sees them in plaintext.
 
----
+**Consent.** Editflow asks per project before anything leaves the browser, and asks separately for each kind of data:
+- the transcript, for planning;
+- still frames, for video analysis;
+- the audio track, for transcription.
+
+**Video analysis.** "Analyse video" in the AI panel works like this:
+1. The browser samples 6–20 small still frames across the current cut, plus one frame of each B-roll clip.
+2. The model sees those frames with the timed caption lines and the brief.
+3. It returns B-roll cutaways (matched to the user's own B-roll clips where they fit) and motion graphics timed to what's said.
+4. The server validates everything and fits the graphics around each other so they don't overlap. The user previews the result before applying it.
+
+**Transcription.** The browser makes a 16 kHz mono WAV and uploads it to Storage. The API then:
+1. splits it at pauses (`shared/speech.js`);
+2. transcribes the parts with OpenAI, 6 at a time;
+3. uses each part's start and end as the line timing;
+4. deletes the audio.
+
+Clips can be up to about 25 minutes.
 
 ## What works today
 
 - Accounts (email/password, guest demo through anonymous sign-in, upgrading a guest to a full account), private projects per user, a sample project
 - Uploads with progress straight to Supabase Storage, or working straight from a folder on the user's computer (any file size, exports saved back into the folder); in-browser reading of duration and resolution, waveforms, pause detection, thumbnails, and reference-video pacing (frame sampling)
-- Story planning (AI or rule-based) as a structured plan: hook options, beats, clip order, captions, B-roll tied to lines with reasons, music mood, sound-design notes, audio clean-up, a review checklist
+- Story planning (ChatGPT, Claude or rule-based) as a structured plan: hook options, beats, clip order, captions, B-roll tied to lines with reasons, music mood, sound-design notes, audio clean-up, a review checklist
+- Video analysis with ChatGPT or Claude: B-roll cutaways (using your own B-roll clips where they fit) and motion graphics from still frames of the cut
+- Motion graphics: lower thirds, keyword pops, stat counters, checklists, callout arrows, progress bars and chapter tags. They're animated, editable on their own timeline track, and drawn by the same code in the preview and the export.
+- Transcription with OpenAI (timed lines split at pauses), or import .srt/.vtt
 - Edits stored as JSON ops with undo/redo and history (`project_history` table); AI proposals previewed before they apply
-- Manual editing: trim, split, reorder, delete, volume, transitions, caption styles and text, 4 text templates, B-roll slots, music with ducking, loudness normalisation, noise reduction, text-based cutting
-- Export in the browser with ffmpeg.wasm: 9:16, 1:1, 4:5 or 16:9 at 540p, 720p or 1080p, with burned-in captions and titles, B-roll cutaways, a −14 LUFS voice and ducked music. Exports under 50 MB are also saved to the user's account.
+- Manual editing: trim, split, reorder, delete, volume, transitions, caption styles and text, 4 text templates, 7 motion graphics, B-roll slots, music with ducking, loudness normalisation, noise reduction, text-based cutting
+- Export in the browser with ffmpeg.wasm: 9:16, 1:1, 4:5 or 16:9 at 540p, 720p or 1080p, with burned-in captions and titles, motion graphics, B-roll cutaways, a −14 LUFS voice and ducked music. Exports under 50 MB are also saved to the user's account.
 
 ## Limits to know
 
@@ -114,7 +133,7 @@ Each user adds their own keys in **AI settings**. Keys are encrypted with `EDITF
 - **Browser rendering** is slower than a server: Draft takes roughly 1–3× the video length on a laptop, and it needs a desktop browser with enough memory.
 - Sample project: placeholder footage, a synthetic speech tone and a written transcript, all labelled.
 - Reframing is a center crop. Reference title style, transitions and music genre aren't measured.
-- On-device Whisper transcription is experimental (it downloads its model from Hugging Face).
+- Video analysis sees still frames, not motion or sound. Graphic placement (like a callout's target) is the model's estimate from those frames, so check it in the preview.
 
 ## Developing
 

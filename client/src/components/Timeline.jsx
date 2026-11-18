@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Scissors, Trash2, ZoomIn, Type, Clapperboard } from 'lucide-react';
+import { Scissors, Trash2, ZoomIn, Type, Clapperboard, Sparkles } from 'lucide-react';
 import { layout, timelineCaptions, formatTime } from '@shared/timeline.js';
+import { GRAPHIC_TYPES, GRAPHIC_COLORS } from '@shared/graphics.js';
 
 const peakCache = new Map();
 function usePeaks(urls, assets) {
@@ -45,6 +46,18 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
   const { clips, duration } = useMemo(() => layout(timeline), [timeline]);
   const caps = useMemo(() => timelineCaptions(timeline), [timeline]);
   const assetMap = useMemo(() => Object.fromEntries(assets.map((a) => [a.id, a])), [assets]);
+  // Overlapping motion graphics are stacked in lanes so each one stays clickable.
+  const gfxLanes = useMemo(() => {
+    const ends = [];
+    const lane = {};
+    for (const g of [...(timeline.graphics || [])].sort((a, b) => a.start - b.start)) {
+      let l = ends.findIndex((e) => e <= g.start + 0.01);
+      if (l < 0) l = ends.length;
+      ends[l] = g.start + g.duration;
+      lane[g.id] = l;
+    }
+    return { lane, count: Math.max(1, ends.length) };
+  }, [timeline.graphics]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -100,6 +113,9 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
       } else if (kind === 'overlay') {
         const o = timeline.overlays.find((k) => k.id === id);
         ops([{ type: 'updateOverlay', overlayId: id, patch: { start: Math.max(0, +(o.start + dt).toFixed(2)) } }], 'Move text');
+      } else if (kind === 'graphic') {
+        const g = timeline.graphics.find((k) => k.id === id);
+        ops([{ type: 'updateGraphic', graphicId: id, patch: { start: Math.max(0, +(g.start + dt).toFixed(2)) } }], 'Move motion graphic');
       } else if (kind === 'broll') {
         const b = timeline.broll.find((k) => k.id === id);
         ops([{ type: 'updateBroll', brollId: id, patch: { start: Math.max(0, +(b.start + dt).toFixed(2)) } }], 'Move B-roll');
@@ -140,6 +156,13 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
         <button
           className="btn sm ghost"
           disabled={readOnly}
+          onClick={() => ops([{ type: 'addGraphic', graphic: { type: 'keyword', text: 'Key point', start: +time.toFixed(2) } }], 'Add motion graphic')}
+        >
+          <Sparkles size={15} /> Add graphic
+        </button>
+        <button
+          className="btn sm ghost"
+          disabled={readOnly}
           onClick={() => ops([{ type: 'addBroll', broll: { start: +time.toFixed(2), duration: 2, description: 'Cutaway shot', reason: 'Added manually' } }], 'Add B-roll slot')}
         >
           <Clapperboard size={15} /> Add B-roll
@@ -158,6 +181,7 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
         <div className="tl-labels">
           <div className="tl-label big">Video</div>
           <div className="tl-label">B-roll</div>
+          <div className="tl-label">Graphics</div>
           <div className="tl-label">Text</div>
           <div className="tl-label">Captions</div>
           <div className="tl-label">Music</div>
@@ -232,6 +256,27 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
                   >
                     {b.assetId ? '' : '+ '}
                     {b.description}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="tl-track">
+              {(timeline.graphics || []).map((g) => {
+                const d = drag?.kind === 'graphic' && drag.id === g.id ? drag.dx : 0;
+                const lane = gfxLanes.lane[g.id] % 3;
+                const n = Math.min(3, gfxLanes.count);
+                const laneStyle = n > 1 ? { top: 3 + lane * (32 / n), bottom: 'auto', height: 32 / n - 2, fontSize: n > 2 ? 9 : 10, padding: '0 5px' } : {};
+                const label = g.text || g.items?.[0] || GRAPHIC_TYPES[g.type]?.label;
+                return (
+                  <div
+                    key={g.id}
+                    className={`tl-chip gfx ${selection?.id === g.id ? 'sel' : ''}`}
+                    style={{ left: x(g.start) + d, width: Math.max(18, x(g.duration) - 2), ...laneStyle }}
+                    onPointerDown={(e) => startDrag(e, 'graphic', g.id, 'move')}
+                    title={`${GRAPHIC_TYPES[g.type]?.label}: ${label}${g.reason ? ` — ${g.reason}` : ''}`}
+                  >
+                    <span className="sw" style={{ background: GRAPHIC_COLORS[g.color]?.hex }} />
+                    {label}
                   </div>
                 );
               })}

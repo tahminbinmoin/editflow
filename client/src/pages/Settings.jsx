@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, XCircle, KeyRound, ExternalLink, Server, ShieldCheck } from 'lucide-react';
+import { CheckCircle2, XCircle, KeyRound, ExternalLink, Server, ShieldCheck, Info } from 'lucide-react';
 import AppHeader from '../components/AppHeader.jsx';
 import { api } from '../lib/api.js';
 import { useAuth } from '../App.jsx';
@@ -47,7 +47,6 @@ function ProviderCard({ p, active, onChange, onActivate }) {
         <div>
           <div className="row wrap">
             <h3 style={{ fontSize: 19 }}>{p.name}</h3>
-            {p.recommended && <span className="pill accent">Recommended for free prototyping</span>}
             {active && <span className="pill ok">Active</span>}
           </div>
           <p className="small muted" style={{ marginTop: 4 }}>
@@ -60,23 +59,6 @@ function ProviderCard({ p, active, onChange, onActivate }) {
       <div className="notice warm tiny">
         <b>Data use:</b> {p.dataUse}
       </div>
-      {p.id === 'freellmapi' && (
-        <details className="disclosure">
-          <summary>How to set up FreeLLMAPI (5 minutes)</summary>
-          <ol className="small text-2" style={{ paddingLeft: 18, margin: 0 }}>
-            <li>
-              Run FreeLLMAPI from{' '}
-              <a href="https://github.com/tashfeenahmed/freellmapi" target="_blank" rel="noreferrer">
-                github.com/tashfeenahmed/freellmapi <ExternalLink size={11} />
-              </a>
-              . On this hosted app it must have a public https address (for example on a small server you control). <code>localhost</code> only works when you run Editflow on your own computer.
-            </li>
-            <li>In its dashboard, add free-tier keys from providers whose terms you accept (Groq, Google AI Studio, Mistral, OpenRouter…), and order the fallback chain.</li>
-            <li>Copy the unified key (starts with <code>freellmapi-</code>) and paste it below, then click Test.</li>
-            <li>Use <code>auto:smart</code> for edit plans: structured JSON needs a capable model.</li>
-          </ol>
-        </details>
-      )}
       <div className="grid-2">
         {p.fields.map((f) => (
           <div className="field" key={f.key}>
@@ -114,11 +96,11 @@ function ProviderCard({ p, active, onChange, onActivate }) {
           Save
         </button>
         <button className="btn sm" onClick={test} disabled={testing || (!p.hasKey && !key)}>
-          {testing && <span className="spinner" />} Test connection{p.id !== 'freellmapi' ? ' & load models' : ''}
+          {testing && <span className="spinner" />} Test key & load models
         </button>
         {!active && (
           <button className="btn sm primary" onClick={() => onActivate(p.id)} disabled={!p.ready}>
-            Use for edit planning
+            Use {p.short || p.name}
           </button>
         )}
         {p.hasKey && (
@@ -138,7 +120,6 @@ function ProviderCard({ p, active, onChange, onActivate }) {
 
 export default function Settings() {
   const [data, setData] = useState(null);
-  const [groqKey, setGroqKey] = useState('');
   const { refresh } = useAuth();
   const toast = useToast();
   const load = () => api('/settings/ai').then(setData);
@@ -156,7 +137,7 @@ export default function Settings() {
   };
   if (!data) return <><AppHeader /><div className="page muted">Loading…</div></>;
   const active = data.prefs.active;
-  const groq = data.transcribers.find((t) => t.id === 'groq');
+  const openai = data.providers.find((p) => p.id === 'openai');
 
   return (
     <>
@@ -165,7 +146,7 @@ export default function Settings() {
         <div>
           <h1 style={{ fontSize: 32 }}>AI settings</h1>
           <p className="muted" style={{ marginTop: 6 }}>
-            Choose what plans your edits. Every provider sits behind the same adapter, so you can switch at any time. Editflow asks before sending a project’s transcript anywhere, and it never sends video files to a language model.
+            Connect ChatGPT or Claude to plan edits, answer change requests and analyse your video for B-roll and motion graphics. You can switch at any time. Editflow asks before sending anything: a transcript, still frames or audio. It never uploads the video file to a language model.
           </p>
         </div>
 
@@ -188,6 +169,22 @@ export default function Settings() {
           )}
         </div>
 
+        <div className="notice info stack-sm">
+          <div className="row">
+            <Info size={16} /> <b>About ChatGPT and Claude subscriptions</b>
+          </div>
+          <div className="small text-2">
+            A ChatGPT Plus/Pro or Claude Pro/Max subscription covers the ChatGPT and Claude apps, not requests from other apps. Anthropic’s terms don’t allow a Claude subscription to power third-party apps, and OpenAI only lets approved partner apps use a ChatGPT plan. So Editflow uses an API key from each provider’s developer platform, billed per request (a typical analysis of a 45-second video sends ~20 small frames and costs a few cents).{' '}
+            <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">
+              OpenAI API keys <ExternalLink size={11} />
+            </a>{' '}
+            ·{' '}
+            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">
+              Anthropic API keys <ExternalLink size={11} />
+            </a>
+          </div>
+        </div>
+
         {data.providers.map((p) => (
           <ProviderCard key={p.id} p={p} active={active === p.id} onChange={(res) => setData({ ...data, ...res })} onActivate={activate} />
         ))}
@@ -195,37 +192,15 @@ export default function Settings() {
         <div className="card stack">
           <div className="spread">
             <h3 style={{ fontSize: 19 }}>Transcription</h3>
-            <span className="pill info">Speech to text</span>
+            <span className={`pill ${openai?.hasKey ? 'ok' : ''}`}>{openai?.hasKey ? 'Ready (uses your OpenAI key)' : 'Needs an OpenAI key'}</span>
           </div>
           <div className="stack-sm small text-2">
             <div>
-              <b>On this device (experimental):</b> runs Whisper in your browser with Transformers.js. It’s free and private, but it downloads a speech model once (about 80 MB) and is slower on long clips.
+              <b>OpenAI:</b> the Transcript tab sends the clip’s audio track (not the picture), split into short parts at pauses; each part becomes a timed line. Uses the OpenAI key above and its transcription model, billed per minute of audio. Works whichever provider plans your edits; Claude doesn’t transcribe audio.
             </div>
             <div>
-              <b>Import:</b> .srt or .vtt caption files give exact timing. Plain text gets estimated timing. Nothing is uploaded.
+              <b>Import:</b> .srt or .vtt caption files give exact timing, and nothing is uploaded. Plain text gets estimated timing.
             </div>
-            <div>
-              <b>{groq.name}:</b> {groq.billing} {groq.dataUse} If you already added a Groq key to FreeLLMAPI, you can reuse it here.
-            </div>
-          </div>
-          <div className="row">
-            <input className="input sm" type="password" autoComplete="off" placeholder={groq.hasKey ? `Saved (${groq.keyMasked}). Paste to replace` : 'Groq API key (gsk_…)'} value={groqKey} onChange={(e) => setGroqKey(e.target.value)} />
-            <button
-              className="btn sm"
-              disabled={!groqKey}
-              onClick={async () => {
-                setData({ ...data, ...(await api('/settings/ai/groq', { method: 'PUT', body: { key: groqKey } })) });
-                setGroqKey('');
-                toast('Groq key saved');
-              }}
-            >
-              Save
-            </button>
-            {groq.hasKey && (
-              <button className="btn sm ghost danger" onClick={async () => setData({ ...data, ...(await api('/settings/ai/groq/key', { method: 'DELETE' })) })}>
-                Remove
-              </button>
-            )}
           </div>
         </div>
 
@@ -257,7 +232,7 @@ export default function Settings() {
               </tbody>
             </table>
           )}
-          <p className="tiny muted">Token counts are as reported by the provider. Check each provider’s dashboard for quota and billing. FreeLLMAPI’s dashboard shows the free-tier budget left per key.</p>
+          <p className="tiny muted">Token counts are as reported by the provider. Check platform.openai.com/usage and console.anthropic.com for spend and limits.</p>
         </div>
 
         <div className="card stack">
@@ -266,8 +241,8 @@ export default function Settings() {
             <h3 style={{ fontSize: 19 }}>Before real customers use this</h3>
           </div>
           <ul className="small text-2" style={{ paddingLeft: 18, margin: 0 }}>
-            <li>FreeLLMAPI is labelled by its authors as for personal experimentation, and provider free tiers generally forbid sharing your endpoint or reselling access. Switch to paid API keys (or a provider’s commercial terms) before serving paying users.</li>
-            <li>Each user adds their own keys here. Don’t give everyone access to one shared free-tier router.</li>
+            <li>Each user adds their own API keys here and pays the provider directly. If you want to include AI in your price instead, add your own keys on the server and meter usage per user.</li>
+            <li>To let users pay with their ChatGPT plan, apply to OpenAI’s “Sign in with ChatGPT” partner programme for hosted apps.</li>
             <li>Supabase’s Free plan limits files to 50 MB and pauses idle projects; upgrade before regular use.</li>
             <li>Turn on email confirmation with a proper SMTP sender, and add CAPTCHA if sign-ups get abused.</li>
           </ul>

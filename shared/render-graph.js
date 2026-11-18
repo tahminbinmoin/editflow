@@ -78,9 +78,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
  * ffmpeg.wasm can't buffer a whole video in memory, so rendering clips one at a time matters.
  *
  * @param project { timeline, assets }
- * @param opts    { aspect, quality, outName, inputPath(asset), media: {[assetId]: {hasVideo, hasAudio}}, fontsDir, workDir }
+ * @param opts    { aspect, quality, outName, inputPath(asset), media: {[assetId]: {hasVideo, hasAudio}}, fontsDir, workDir,
+ *                  graphics: [{ listName, start, end }] — motion graphics pre-rendered as PNG frames (ffconcat lists) }
  */
-export function buildRenderPlan(project, { aspect, quality, outName, inputPath, media = {}, fontsDir = 'fonts', workDir = '' }) {
+export function buildRenderPlan(project, { aspect, quality, outName, inputPath, media = {}, fontsDir = 'fonts', workDir = '', graphics = [] }) {
   const tl = normalizeTimeline({ ...project.timeline, format: { ...project.timeline.format, aspect } });
   const { clips, duration } = layout(tl);
   if (!clips.length) throw new Error('The timeline is empty — add at least one clip before exporting.');
@@ -136,6 +137,14 @@ export function buildRenderPlan(project, { aspect, quality, outName, inputPath, 
       graph.push(`[${vLabel}][br${k}]overlay=eof_action=pass:enable='between(t,${f3(b.start)},${f3(b.start + d)})'[vb${k}]`);
       vLabel = `vb${k}`;
     });
+  // Motion graphics (transparent PNG frames drawn by shared/graphics.js) sit above B-roll, below captions.
+  graphics.forEach((g, k) => {
+    const idx = inputs.length;
+    inputs.push(['-f', 'concat', '-safe', '0', '-i', g.listName]);
+    graph.push(`[${idx}:v]setpts=PTS-STARTPTS+${f3(g.start)}/TB,fps=30,format=rgba[gx${k}]`);
+    graph.push(`[${vLabel}][gx${k}]overlay=eof_action=pass:format=auto:enable='between(t,${f3(g.start)},${f3(g.end)})'[vg${k}]`);
+    vLabel = `vg${k}`;
+  });
   graph.push(`[${vLabel}]subtitles=filename=${workDir}overlays.ass:fontsdir=${fontsDir}[vout]`);
 
   const voice = ['highpass=f=70'];

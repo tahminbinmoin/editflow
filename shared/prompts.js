@@ -1,4 +1,5 @@
 import { layout, formatTime, OVERLAY_TEMPLATES, timelineCaptions } from './timeline.js';
+import { GRAPHIC_TYPES, GRAPHIC_COLORS } from './graphics.js';
 
 const t = (s) => formatTime(s);
 
@@ -27,6 +28,14 @@ function briefBlock(project) {
   if (st.referenceNotes) lines.push(`Creator's description of the reference style: ${st.referenceNotes}`);
   return lines.filter(Boolean).join('\n');
 }
+
+const GRAPHIC_OPS = `{"type":"addGraphic","graphic":{"type":"${Object.keys(GRAPHIC_TYPES).join('|')}","start":2.0,"duration":2.5,"text":"...","sub":"...","items":["..."],"x":0.5,"y":0.5,"color":"${Object.keys(GRAPHIC_COLORS).join('|')}","position":"top|center|bottom"}}
+{"type":"updateGraphic","graphicId":"...","patch":{"text":"...","start":2.0,"duration":2.0,"color":"yellow"}}
+{"type":"deleteGraphic","graphicId":"..."}`;
+
+const GRAPHIC_GUIDE = Object.entries(GRAPHIC_TYPES)
+  .map(([k, g]) => `- ${k}: ${g.desc}${g.fields.length ? ` (fields: ${g.fields.join(', ').replace('point', 'x, y = 0–1 position of the thing it points at')})` : ''}`)
+  .join('\n');
 
 const RULES = `Rules:
 - Use ONLY transcript segment IDs that appear in the transcript (e.g. "s3"). Never invent IDs, timestamps, quotes or footage.
@@ -78,7 +87,7 @@ export function refinePrompt(project, request) {
       return `${i + 1}. id=${c.id} role=${c.role || '-'} source=${t(c.in)}–${t(c.out)} timeline=${t(c.tlStart)}–${t(c.tlEnd)} volume=${c.volume} transition=${c.transitionIn} segments=[${said.join(',')}]`;
     })
     .join('\n');
-  const system = `You are the editing assistant inside Editflow. The creator asks for changes in plain language; you answer with a small list of edit operations (JSON) that the app previews before applying. Change only what was asked. If something cannot be done with the available operations (for example detecting close-ups requires visual analysis Editflow does not have), say so in "notes" and propose the closest honest alternative.\nReturn ONLY a JSON object.`;
+  const system = `You are the editing assistant inside Editflow. The creator asks for changes in plain language; you answer with a small list of edit operations (JSON) that the app previews before applying. Change only what was asked. You only see the transcript here, not the picture: for anything that depends on what is on screen, say in "notes" that the creator can use "Analyse video" (which sends still frames) and propose the closest honest alternative.\nReturn ONLY a JSON object.`;
   const user = `CREATOR BRIEF
 ${briefBlock(project)}
 
@@ -89,6 +98,7 @@ CURRENT CUT (total ${t(duration)})
 ${clipLines || '(empty)'}
 Captions: enabled=${tl.captions.enabled} style=${tl.captions.style} position=${tl.captions.position}; ${caps.length} caption lines
 Text overlays: ${JSON.stringify(tl.overlays.map(({ id, template, text, start, duration: d }) => ({ id, template, text, start, duration: d })))}
+Motion graphics: ${JSON.stringify((tl.graphics || []).map(({ id, type, text, sub, items, start, duration: d, color, position }) => ({ id, type, text, sub, items, start, duration: d, color, position })))}
 B-roll: ${JSON.stringify(tl.broll.map(({ id, start, duration: d, description, assetId }) => ({ id, start, duration: d, description, hasFootage: !!assetId })))}
 Music: ${JSON.stringify(tl.music)}
 Voice audio: ${JSON.stringify(tl.audio)}
@@ -103,6 +113,7 @@ AVAILABLE OPERATIONS (times in seconds; clip in/out are SOURCE times, overlay/br
 {"type":"addOverlay","overlay":{"template":"title|lowerThird|kicker|cta","text":"...","start":0,"duration":2.5}}
 {"type":"updateOverlay","overlayId":"...","patch":{"text":"...","start":0,"duration":2}}
 {"type":"deleteOverlay","overlayId":"..."}
+${GRAPHIC_OPS}
 {"type":"addBroll","broll":{"start":3.0,"duration":2.0,"description":"...","reason":"..."}}
 {"type":"deleteBroll","brollId":"..."}
 {"type":"setMusic","patch":{"mood":"...","volume":0.2,"duck":true}}
@@ -119,5 +130,59 @@ export function referencePrompt(project) {
   const user = `${briefBlock(project)}
 
 Return JSON: {"structure": "...", "pacing": "...", "shotRhythm": "...", "titleTreatment": "...", "transitions": "...", "audioMood": "...", "matchPlan": ["specific, actionable steps"], "confidence": "what is measured vs inferred from the description"}`;
+  return { system, user };
+}
+
+/**
+ * Video analysis: the model sees still frames sampled across the CURRENT CUT (timeline times),
+ * the timed transcript lines, and the creator's own B-roll library, and proposes B-roll and
+ * motion graphics tied to what is said and shown.
+ */
+export function visualsPrompt(project, frameTimes, libraryLabels = []) {
+  const tl = project.timeline;
+  const { duration } = layout(tl);
+  const caps = timelineCaptions(tl);
+  const lines = caps.length
+    ? caps.map((c) => `${t(c.start)}–${t(c.end)} ${c.text}`).join('\n')
+    : '(no captions on the cut yet)';
+  const library = project.assets.filter((a) => a.kind === 'broll' && a.status === 'ready' && a.hasVideo !== false);
+  const libText = libraryLabels.length
+    ? libraryLabels.map((l) => { const a = library[Number(String(l).slice(1)) - 1]; return `${l}: "${a?.name || 'clip'}" (${a?.duration ? a.duration.toFixed(1) : '?'}s long)`; }).join('\n')
+    : '(the creator has not added B-roll footage — suggest shots to film or license)';
+  const system = `You are the visual editor inside Editflow, a short-form video editor. You look at still frames from the creator's current cut and its timed transcript, then propose B-roll cutaways and animated motion graphics that make the video clearer and more engaging. Everything you return is previewed by the creator before it is applied.
+
+Rules:
+- Base every suggestion on what is actually said (timed lines) and actually visible (frames). Describe what you see honestly; never invent products, people, brands, numbers or claims that are not in the transcript or frames.
+- Times are seconds on the TIMELINE of the cut (0 to ${duration.toFixed(1)}). Frames are labelled with their timeline time.
+- B-roll: cover moments where the talking head can be replaced by something that SHOWS what is said (a product, a step, a place, a result). If a clip from the creator's B-roll library fits, set "footage" to its label (e.g. "B2") and "srcIn" to where in that clip to start. Otherwise set "footage": null and describe a shot the creator could film or license. 1.5–4 s each, not overlapping each other, and not in the first 1.5 s (keep the hook on the speaker's face) unless the hook is about an object.
+- Motion graphics: use sparingly (about one every 6–10 seconds at most) where they add information: a lowerThird when the speaker introduces themselves, a stat when a number is said, a keyword for the single key idea of a sentence, a list when steps or items are enumerated, a callout to point at an object visible in a frame (x, y = its position in the frame, 0–1), a chapter tag when the topic shifts, a progress bar only for tutorials or lists. Keep text short: keyword ≤ 3 words, list items ≤ 5 words. Time each graphic to start when the words are said. Never let two graphics in the same screen area overlap in time (a progress bar is the exception), and keep clear of the existing text overlays listed below.
+- Colours: pick from ${Object.keys(GRAPHIC_COLORS).join(', ')}; prefer one consistent colour that contrasts with the footage you see. Positions: top, center or bottom (captions sit at the bottom; avoid covering the speaker's face).
+- Return ONLY a JSON object.
+
+Motion graphic types:
+${GRAPHIC_GUIDE}`;
+  const user = `CREATOR BRIEF
+${briefBlock(project)}
+
+CUT: ${t(duration)} long, ${tl.clips.length} clips. ${frameTimes.length} frames attached at ${frameTimes.map((x) => x.toFixed(1)).join(', ')} s.
+
+TIMED LINES ON THE CUT (timeline start–end, text)
+${lines}
+
+EXISTING B-ROLL: ${JSON.stringify(tl.broll.map(({ start, duration: d, description, assetId }) => ({ start, duration: d, description, hasFootage: !!assetId })))}  (slots without footage will be replaced by your suggestions)
+EXISTING MOTION GRAPHICS: ${JSON.stringify((tl.graphics || []).map(({ type, text, start, duration: d, position }) => ({ type, text, start, duration: d, position })))}  (don't duplicate or overlap these)
+EXISTING TEXT OVERLAYS: ${JSON.stringify(tl.overlays.map(({ template, text, start, duration: d }) => ({ template, text, start, duration: d })))}  (title = center, kicker = top, lowerThird/cta = bottom)
+
+CREATOR'S B-ROLL LIBRARY (one frame of each is attached after the cut frames)
+${libText}
+
+Return JSON with exactly this shape:
+{
+  "summary": "2-3 sentences: what the video shows and what your visual plan adds",
+  "scenes": [{"start": 0, "end": 3.5, "what": "what is on screen"}],
+  "broll": [{"start": 4.2, "duration": 2.5, "description": "what to show", "reason": "why it helps here", "footage": "B1 or null", "srcIn": 0}],
+  "graphics": [{"type": "${Object.keys(GRAPHIC_TYPES).join('|')}", "start": 6.0, "duration": 2.5, "text": "...", "sub": "...", "items": ["..."], "x": 0.5, "y": 0.5, "color": "accent", "position": "center", "reason": "why it helps here"}],
+  "notes": ["anything the creator should check or film"]
+}`;
   return { system, user };
 }

@@ -1,37 +1,25 @@
 import { useMemo, useRef, useState } from 'react';
-import { FileText, Cpu, Cloud, Keyboard, Pencil, Check, X, Undo2, Plus } from 'lucide-react';
+import { FileText, Cloud, Keyboard, Pencil, Check, X, Undo2, Plus } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { formatTime, layout } from '@shared/timeline.js';
 import { segmentInCut, removeSegmentOps, addSegmentOps } from '../lib/edits.js';
-import { Progress, useToast } from './ui.jsx';
+import { useAuth } from '../App.jsx';
 
 const SOURCES = {
   sample: 'Sample transcript (written for the demo)',
   import: 'Imported caption file',
   'import-estimated': 'Imported text: timing is estimated, so check cut points',
+  'openai-transcribe': 'Transcribed with OpenAI (timing from pauses in the audio)',
   'groq-whisper': 'Transcribed with Groq Whisper',
   'local-whisper': 'Transcribed on this device (Whisper)',
   manual: 'Typed manually',
 };
 
-function AddTranscript({ asset, act, readOnly }) {
-  const toast = useToast();
+function AddTranscript({ asset, act, readOnly, busy, status, openaiReady }) {
   const fileRef = useRef();
   const [manual, setManual] = useState(null);
-  const [local, setLocal] = useState(null);
 
   const importFile = async (f) => act.importTranscript(asset.id, await f.text());
-  const groq = () => act.transcribeGroq(asset.id);
-  const onDevice = async () => {
-    setLocal({ step: 'Starting…', progress: 0 });
-    try {
-      const n = await act.transcribeLocal(asset.id, setLocal);
-      toast(`Transcribed ${n} lines on this device`);
-    } catch (e) {
-      toast(`On-device transcription failed: ${e.message}. Try importing a caption file instead.`, 'err');
-    } finally {
-      setLocal(null);
-    }
-  };
   const saveManual = async () => {
     await act.importTranscript(asset.id, manual);
     setManual(null);
@@ -44,10 +32,9 @@ function AddTranscript({ asset, act, readOnly }) {
         <b className="small">{asset.name}</b>
         <p className="tiny muted">A transcript powers story planning, text-based cutting and captions.</p>
       </div>
-      {local ? (
-        <div className="stack-sm">
-          <div className="tiny text-2">{local.step}</div>
-          <Progress value={local.progress} />
+      {busy === 'transcribing' ? (
+        <div className="row small text-2">
+          <span className="spinner" /> {status || 'Transcribing…'}
         </div>
       ) : manual != null ? (
         <div className="stack-sm">
@@ -67,17 +54,18 @@ function AddTranscript({ asset, act, readOnly }) {
           <button className="btn sm block" onClick={() => fileRef.current.click()} style={{ justifyContent: 'flex-start' }}>
             <FileText size={15} /> Import .srt / .vtt / .txt
           </button>
-          <button className="btn sm block" onClick={groq} style={{ justifyContent: 'flex-start' }} title="Uses your Groq API key (free plan available, rate-limited)">
-            <Cloud size={15} /> Transcribe with Groq Whisper
-          </button>
-          <button className="btn sm block" onClick={onDevice} style={{ justifyContent: 'flex-start' }} title="Experimental — runs Whisper in your browser">
-            <Cpu size={15} /> Transcribe on this device <span className="pill" style={{ marginLeft: 'auto' }}>experimental</span>
+          <button className="btn sm block" onClick={() => act.transcribe(asset.id)} disabled={!!busy} style={{ justifyContent: 'flex-start' }} title="Uses your OpenAI API key">
+            <Cloud size={15} /> Transcribe with OpenAI
           </button>
           <button className="btn sm block ghost" onClick={() => setManual('')} style={{ justifyContent: 'flex-start' }}>
             <Keyboard size={15} /> Type or paste it
           </button>
           <p className="tiny muted">
-            Groq: needs your Groq key in AI settings; only the audio is sent, after you confirm (clips up to ~13 min). On-device: free and private, downloads a speech model once, and is slower on long clips.
+            {openaiReady ? 'OpenAI: only the audio track is sent, after you confirm (clips up to about 25 minutes, billed per minute to your OpenAI API account).' : (
+              <>
+                OpenAI transcription needs your OpenAI API key in <Link to="/app/settings">AI settings</Link> (Claude doesn’t transcribe audio). Or import a caption file.
+              </>
+            )}
           </p>
           <input ref={fileRef} type="file" hidden accept=".srt,.vtt,.txt,text/plain" onChange={(e) => e.target.files[0] && importFile(e.target.files[0])} />
         </div>
@@ -86,7 +74,8 @@ function AddTranscript({ asset, act, readOnly }) {
   );
 }
 
-export default function TranscriptPanel({ project, timeline, time, onSeek, ops, act, readOnly }) {
+export default function TranscriptPanel({ project, timeline, time, onSeek, ops, act, readOnly, busy, status }) {
+  const { engine } = useAuth();
   const [editing, setEditing] = useState(null);
   const footage = project.assets.filter((a) => a.kind === 'footage' && a.status === 'ready' && a.hasAudio);
   const { clips } = useMemo(() => layout(timeline), [timeline]);
@@ -112,7 +101,7 @@ export default function TranscriptPanel({ project, timeline, time, onSeek, ops, 
       )}
       {footage.map((a) => {
         const segs = project.transcript.segments.filter((s) => s.assetId === a.id).sort((x, y) => x.start - y.start);
-        if (!segs.length) return <AddTranscript key={a.id} asset={a} act={act} readOnly={readOnly} />;
+        if (!segs.length) return <AddTranscript key={a.id} asset={a} act={act} readOnly={readOnly} busy={busy} status={status} openaiReady={!!engine?.transcription} />;
         return (
           <div key={a.id} className="stack-sm">
             {footage.length > 1 && <div className="section-title">{a.name}</div>}

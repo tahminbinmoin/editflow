@@ -56,7 +56,7 @@ export default function Studio() {
   const { id } = useParams();
   const nav = useNavigate();
   const { engine } = useAuth();
-  const { project, error, ops, act, busy, urls, folders, consent, allowConsent, cancelConsent } = useProject(id);
+  const { project, error, ops, act, busy, status, urls, folders, consent, allowConsent, cancelConsent } = useProject(id);
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [selection, setSelection] = useState(null);
@@ -96,7 +96,7 @@ export default function Studio() {
   const redo = useCallback(() => act.redo(), [act]);
   const deleteSelected = useCallback(() => {
     if (!selection) return;
-    const op = { clip: { type: 'deleteClip', clipId: selection.id }, overlay: { type: 'deleteOverlay', overlayId: selection.id }, broll: { type: 'deleteBroll', brollId: selection.id }, caption: { type: 'deleteCaption', captionId: selection.id } }[selection.type];
+    const op = { clip: { type: 'deleteClip', clipId: selection.id }, overlay: { type: 'deleteOverlay', overlayId: selection.id }, broll: { type: 'deleteBroll', brollId: selection.id }, graphic: { type: 'deleteGraphic', graphicId: selection.id }, caption: { type: 'deleteCaption', captionId: selection.id } }[selection.type];
     if (op) ops([op], 'Delete');
     setSelection(null);
   }, [selection, ops]);
@@ -147,12 +147,12 @@ export default function Studio() {
   };
 
   const assist = (
-    <AIPanel project={project} engine={engine} act={act} busy={busy} ops={ops} preview={preview} setPreview={setPreview} onSeek={seek} />
+    <AIPanel project={project} engine={engine} act={act} busy={busy} status={status} ops={ops} preview={preview} setPreview={setPreview} onSeek={seek} />
   );
   const edit = <EditPanel project={project} timeline={timeline} selection={selection} onSelect={setSelection} ops={ops} time={time} onSeek={seek} readOnly={showingPending} />;
   const leftPanels = {
     story: <StoryPanel project={project} timeline={timeline} time={time} onSeek={seek} selection={selection} onSelect={selectAndEdit} />,
-    transcript: <TranscriptPanel project={project} timeline={timeline} time={time} onSeek={seek} ops={ops} act={act} readOnly={showingPending} />,
+    transcript: <TranscriptPanel project={project} timeline={timeline} time={time} onSeek={seek} ops={ops} act={act} readOnly={showingPending} busy={busy} status={status} />,
     media: <MediaPanel project={project} urls={urls} folders={folders} act={act} ops={ops} busy={busy} readOnly={showingPending} />,
   };
 
@@ -188,7 +188,7 @@ export default function Studio() {
         )}
         {busy && busy !== 'edit' && (
           <span className="pill info">
-            <span className="spinner" style={{ width: 11, height: 11 }} /> {busy === 'firstCut' ? 'Planning the cut…' : busy === 'refine' ? 'Working on your request…' : busy === 'transcribing' ? 'Transcribing…' : busy === 'reference' ? 'Analysing style…' : 'Saving…'}
+            <span className="spinner" style={{ width: 11, height: 11 }} /> {busy === 'firstCut' ? 'Planning the cut…' : busy === 'refine' ? 'Working on your request…' : busy === 'transcribing' ? status || 'Transcribing…' : busy === 'visuals' ? status || 'Analysing the video…' : busy === 'reference' ? 'Analysing style…' : 'Saving…'}
           </span>
         )}
         <div className="grow" />

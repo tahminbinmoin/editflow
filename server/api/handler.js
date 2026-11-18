@@ -3,12 +3,16 @@
 //
 // Every request is made with the user's own Supabase session, so row-level security applies
 // to everything this server reads or writes. It only does the work that needs a secret:
-// calling AI providers with the user's encrypted keys, and Groq transcription.
+// calling ChatGPT (OpenAI) or Claude (Anthropic) with the user's encrypted keys, including
+// video analysis from still frames and OpenAI transcription.
 import { createClient } from '@supabase/supabase-js';
 import { DEFAULT_SUPABASE_URL, DEFAULT_SUPABASE_PUBLISHABLE_KEY, MEDIA_BUCKET } from '../../shared/config.js';
-import { PROVIDERS, TRANSCRIBERS, extractJson, checkRouterUrl } from '../ai/providers.js';
+import { PROVIDERS, SUBSCRIPTION_INFO, extractJson } from '../ai/providers.js';
 import { encrypt, decrypt, mask } from '../lib/secrets.js';
-import { planPrompt, refinePrompt, referencePrompt } from '../../shared/prompts.js';
+import { planPrompt, refinePrompt, referencePrompt, visualsPrompt } from '../../shared/prompts.js';
+import { wavInfo, wavSamples, speechChunks, wavSlice, mapLimit } from '../../shared/speech.js';
+import { cleanGraphic, fitGraphics, GRAPHIC_TYPES } from '../../shared/graphics.js';
+import { normalizeTimeline, totalDuration } from '../../shared/timeline.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || DEFAULT_SUPABASE_PUBLISHABLE_KEY;
@@ -22,12 +26,12 @@ function send(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-async function readBody(req) {
+async function readBody(req, limit = 1_000_000) {
   if (req.body !== undefined) return typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body || {};
   const chunks = [];
   for await (const c of req) chunks.push(c);
   const raw = Buffer.concat(chunks).toString('utf8');
-  if (raw.length > 1_000_000) throw fail(413, 'Request too large');
+  if (raw.length > limit) throw fail(413, 'Request too large');
   return raw ? JSON.parse(raw) : {};
 }
 
@@ -55,7 +59,7 @@ async function upsert(ctx, provider, patch) {
   if (error) throw fail(500, error.message);
 }
 function load(all, id) {
-  const def = PROVIDERS[id] || TRANSCRIBERS[id];
+  const def = PROVIDERS[id];
   if (!def) throw fail(404, 'Unknown provider');
   const r = all[id];
   const config = { ...(def.defaults ? def.defaults() : {}), ...(r?.config || {}) };
@@ -87,14 +91,10 @@ async function listProviders(ctx) {
       hasKey: !!key,
       keyMasked: mask(key),
       lastTest: lastTest || null,
-      ready: !!key && (p.id === 'freellmapi' || !!cfg.model),
+      ready: !!key && !!cfg.model,
     };
   });
-  const transcribers = Object.values(TRANSCRIBERS).map((t) => {
-    const { key } = load(all, t.id);
-    return { id: t.id, name: t.name, billing: t.billing, dataUse: t.dataUse, secretLabel: t.secretLabel, hasKey: !!key, keyMasked: mask(key) };
-  });
-  return { providers, transcribers, prefs: prefsOf(all) };
+  return { providers, prefs: prefsOf(all), subscriptionNote: SUBSCRIPTION_INFO, transcription: { provider: 'openai', ready: providers.find((p) => p.id === 'openai')?.hasKey || false } };
 }
 
 async function activeEngine(ctx, all) {
@@ -103,7 +103,17 @@ async function activeEngine(ctx, all) {
   if (prefs.active === 'rules' || !PROVIDERS[prefs.active]) return { id: 'rules', name: 'Rule-based (no AI)' };
   const { def, config, key } = load(all, prefs.active);
   if (!key) return { id: 'rules', name: 'Rule-based (no AI)', fallbackReason: `${def.name} has no key saved` };
-  return { id: def.id, name: def.name, def, config, key, model: config.model };
+  return { id: def.id, name: def.name, def, config, key, model: config.model, vision: !!def.vision };
+}
+
+const CONSENT_TEXT = {
+  frames: 'still frames from your cut',
+  audio: 'the audio track',
+};
+function requireConsent(project, providerId, name, dataUse, kind) {
+  const key = kind ? `${providerId}:${kind}` : providerId;
+  if (!project.consent?.[key]?.allowed)
+    throw fail(409, `Consent needed before sending ${kind ? CONSENT_TEXT[kind] : 'this project’s transcript'} to ${name}.`, { code: 'consent_required', provider: { id: key, name, dataUse, kind: kind || 'transcript' } });
 }
 
 // ---------- AI tasks ----------
@@ -118,14 +128,14 @@ async function log(ctx, entry) {
   await ctx.supabase.from('ai_log').insert({ user_id: ctx.user.id, ...entry });
 }
 
-async function runJsonTask(ctx, project, task, prompt) {
+async function runJsonTask(ctx, project, task, prompt, { images = [] } = {}) {
   const eng = await activeEngine(ctx);
-  if (eng.id === 'rules') throw fail(400, 'No AI provider is active.', { code: 'no_provider' });
-  if (!project.consent?.[eng.id]?.allowed) throw fail(409, 'Consent needed before sending this project’s transcript to an AI provider.', { code: 'consent_required', provider: { id: eng.id, name: eng.name, dataUse: eng.def.dataUse } });
+  if (eng.id === 'rules') throw fail(400, 'No AI provider is active. Connect ChatGPT or Claude in AI settings.', { code: 'no_provider' });
+  requireConsent(project, eng.id, eng.name, eng.def.dataUse, images.length ? 'frames' : null);
   const base = { project_id: project.id, provider: eng.id, task };
   let res;
   try {
-    res = await eng.def.chat(eng.config, eng.key, { ...prompt, json: true });
+    res = await eng.def.chat(eng.config, eng.key, { ...prompt, json: true, images });
   } catch (e) {
     await log(ctx, { ...base, model: eng.model, ok: false, error: e.message.slice(0, 500) });
     throw fail(e.status === 400 ? 400 : 502, `${eng.name}: ${e.message}`);
@@ -135,12 +145,12 @@ async function runJsonTask(ctx, project, task, prompt) {
     data = extractJson(res.text);
   } catch (e) {
     try {
-      const retry = await eng.def.chat(eng.config, eng.key, { system: prompt.system, user: `${prompt.user}\n\nYour previous reply was not valid JSON (${e.message}). Reply again with ONLY the JSON object.`, json: true });
+      const retry = await eng.def.chat(eng.config, eng.key, { system: prompt.system, user: `${prompt.user}\n\nYour previous reply was not valid JSON (${e.message}). Reply again with ONLY the JSON object.`, json: true, images });
       data = extractJson(retry.text);
       res = { ...retry, usage: { input: (res.usage?.input || 0) + (retry.usage?.input || 0), output: (res.usage?.output || 0) + (retry.usage?.output || 0) } };
     } catch {
       await log(ctx, { ...base, model: res.model, routed_via: res.routedVia, ok: false, error: 'invalid JSON' });
-      throw fail(502, `${eng.name} returned a reply Editflow could not read as an edit plan. Try again, or pick a more capable model (e.g. auto:smart).`);
+      throw fail(502, `${eng.name} returned a reply Editflow could not read as an edit plan. Try again, or pick a more capable model in AI settings.`);
     }
   }
   await log(ctx, { ...base, model: res.model || eng.model, routed_via: res.routedVia, ok: true, input_tokens: res.usage?.input ?? null, output_tokens: res.usage?.output ?? null });
@@ -150,13 +160,63 @@ async function runJsonTask(ctx, project, task, prompt) {
   };
 }
 
-const REFINE_TYPES = new Set(['trimClip', 'moveClip', 'deleteClip', 'addSegment', 'updateClip', 'setCaptionStyle', 'addOverlay', 'updateOverlay', 'deleteOverlay', 'addBroll', 'deleteBroll', 'updateBroll', 'setMusic', 'setAudio']);
+const REFINE_TYPES = new Set(['trimClip', 'moveClip', 'deleteClip', 'addSegment', 'updateClip', 'setCaptionStyle', 'addOverlay', 'updateOverlay', 'deleteOverlay', 'addBroll', 'deleteBroll', 'updateBroll', 'addGraphic', 'updateGraphic', 'deleteGraphic', 'setMusic', 'setAudio']);
+
+const MAX_FRAMES = 24;
+const MAX_LIBRARY = 12;
+const b64ok = (d) => typeof d === 'string' && d.length > 100 && d.length < 400_000 && /^[A-Za-z0-9+/=]+$/.test(d.slice(0, 200));
+
+/** Turn the model's visual-analysis reply into timeline ops (validated, clamped to the cut). */
+export function visualsToOps(data, project) {
+  const tl = normalizeTimeline(project.timeline);
+  const D = totalDuration(tl);
+  const library = project.assets.filter((a) => a.kind === 'broll' && a.status === 'ready' && a.hasVideo !== false);
+  const libById = Object.fromEntries(library.map((a, i) => [`B${i + 1}`, a]));
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  const ops = [];
+  const notes = [];
+  const broll = (Array.isArray(data.broll) ? data.broll : []).slice(0, 12);
+  if (broll.length) for (const b of tl.broll.filter((x) => !x.assetId)) ops.push({ type: 'deleteBroll', brollId: b.id });
+  for (const b of broll) {
+    const start = Math.max(0, Math.min(D - 0.5, num(b.start, 0)));
+    const lib = libById[String(b.footage || b.assetId || '').trim().toUpperCase()];
+    const duration = Math.max(0.8, Math.min(6, num(b.duration, 2), D - start));
+    ops.push({
+      type: 'addBroll',
+      broll: {
+        start: +start.toFixed(2),
+        duration: +duration.toFixed(2),
+        description: String(b.description || 'Cutaway shot').slice(0, 200),
+        reason: String(b.reason || '').slice(0, 300),
+        assetId: lib ? lib.id : null,
+        srcIn: lib ? Math.max(0, Math.min(Math.max(0, (lib.duration || 0) - duration), num(b.srcIn, 0))) : 0,
+      },
+    });
+  }
+  const incoming = [];
+  for (const g of (Array.isArray(data.graphics) ? data.graphics : []).slice(0, 10)) {
+    try {
+      const clean = cleanGraphic({ ...g, start: Math.max(0, Math.min(D - 0.6, num(g.start, 0))) });
+      clean.duration = Math.min(clean.duration, Math.max(0.6, D - clean.start));
+      if (clean.type === 'progress') ((clean.start = 0), (clean.duration = D));
+      delete clean.id;
+      incoming.push(clean);
+    } catch (e) {
+      notes.push(`Skipped a graphic: ${e.message}`);
+    }
+  }
+  const { kept, dropped } = fitGraphics(tl.graphics, incoming);
+  for (const g of kept) ops.push({ type: 'addGraphic', graphic: g });
+  for (const g of dropped) notes.push(`Left out the ${GRAPHIC_TYPES[g.type].label.toLowerCase()} “${g.text || g.items[0] || ''}” at ${g.start.toFixed(1)}s: it would cover another graphic.`);
+  return { ops, notes };
+}
 
 // ---------- routes ----------
 const routes = [
   ['GET', /^\/engine$/, async (ctx) => {
-    const e = await activeEngine(ctx);
-    return { id: e.id, name: e.name, model: e.model || null, fallbackReason: e.fallbackReason || null };
+    const all = await rows(ctx);
+    const e = await activeEngine(ctx, all);
+    return { id: e.id, name: e.name, model: e.model || null, vision: !!e.vision, dataUse: e.def?.dataUse || null, fallbackReason: e.fallbackReason || null, transcription: !!load(all, 'openai').key };
   }],
   ['GET', /^\/settings\/ai$/, async (ctx) => {
     const { data } = await ctx.supabase
@@ -180,7 +240,7 @@ const routes = [
       const def = PROVIDERS[body.active];
       if (!def) throw fail(400, 'Unknown provider');
       const { config, key } = load(all, def.id);
-      if (!key || (def.id !== 'freellmapi' && !config.model)) throw fail(400, `Finish setting up ${def.name} first (key${def.id === 'freellmapi' ? '' : ' and model'}).`);
+      if (!key || !config.model) throw fail(400, `Finish setting up ${def.name} first (API key and model).`);
     }
     await upsert(ctx, '_prefs', { config: { ...prefsOf(all), active: body.active } });
     return listProviders(ctx);
@@ -191,7 +251,6 @@ const routes = [
     const allowed = new Set([...(def.fields || []).map((f) => f.key), 'model']);
     const clean = { ...cur };
     for (const [k, v] of Object.entries(body.config || {})) if (allowed.has(k)) clean[k] = String(v).trim().slice(0, 300);
-    if (clean.baseUrl) clean.baseUrl = checkRouterUrl(clean.baseUrl);
     const patch = { config: clean };
     if (body.key) patch.secret = encrypt(String(body.key).trim().slice(0, 500));
     else if (all[id]?.secret) patch.secret = all[id].secret;
@@ -244,24 +303,54 @@ const routes = [
     const { data, meta } = await runJsonTask(ctx, p, 'reference', referencePrompt(p));
     return { ...data, engine: 'ai', meta };
   }],
-  ['POST', /^\/transcribe\/groq$/, async (ctx, body) => {
+  ['POST', /^\/ai\/visuals$/, async (ctx, body) => {
     const p = await loadProject(ctx, body.projectId);
-    if (!p.consent?.groq?.allowed) throw fail(409, 'Consent needed before uploading audio to Groq.', { code: 'consent_required', provider: { id: 'groq', name: 'Groq Whisper', dataUse: TRANSCRIBERS.groq.dataUse } });
+    if (!normalizeTimeline(p.timeline).clips.length) throw fail(400, 'Make a first cut before analysing the video.');
+    const frames = (Array.isArray(body.frames) ? body.frames : []).filter((f) => b64ok(f?.data) && Number.isFinite(Number(f.t))).slice(0, MAX_FRAMES);
+    if (frames.length < 2) throw fail(400, 'Could not read frames from the video. Check that the footage plays in the preview.');
+    const library = (Array.isArray(body.library) ? body.library : []).filter((f) => b64ok(f?.data) && f.label).slice(0, MAX_LIBRARY);
+    const prompt = visualsPrompt(p, frames.map((f) => Number(f.t)), library.map((f) => f.label));
+    const images = [
+      ...frames.map((f) => ({ label: `CUT FRAME at ${Number(f.t).toFixed(1)}s on the timeline:`, data: f.data })),
+      ...library.map((f) => ({ label: `B-ROLL LIBRARY ${f.label}:`, data: f.data })),
+    ];
+    const { data, meta } = await runJsonTask(ctx, p, 'visuals', prompt, { images });
+    const { ops, notes } = visualsToOps(data, p);
+    return {
+      summary: String(data.summary || 'Visual suggestions').slice(0, 600),
+      scenes: (Array.isArray(data.scenes) ? data.scenes : []).slice(0, 30).map((sc) => ({ start: Number(sc.start) || 0, end: Number(sc.end) || 0, what: String(sc.what || '').slice(0, 200) })),
+      ops,
+      notes: [...(Array.isArray(data.notes) ? data.notes.map(String).slice(0, 6) : []), ...notes],
+      meta: { ...meta, frames: frames.length, library: library.length },
+    };
+  }],
+  ['POST', /^\/transcribe\/openai$/, async (ctx, body) => {
+    const p = await loadProject(ctx, body.projectId);
+    const def = PROVIDERS.openai;
+    requireConsent(p, 'openai', def.name, def.dataUse, 'audio');
     const all = await rows(ctx);
-    const { key } = load(all, 'groq');
-    if (!key) throw fail(400, 'Add your Groq API key in AI settings → Transcription first.');
+    const { config, key } = load(all, 'openai');
+    if (!key) throw fail(400, 'Add your OpenAI API key in AI settings to transcribe.');
     const path = String(body.path || '');
     if (!path.startsWith(`${ctx.user.id}/${p.id}/`)) throw fail(403, 'That audio file does not belong to this project.');
-    const { data: blob, error } = await ctx.supabase.storage.from(MEDIA_BUCKET).download(path);
-    if (error || !blob) throw fail(404, 'Could not read the uploaded audio.');
-    if (blob.size > 25 * 1024 * 1024) throw fail(400, `The audio is ${(blob.size / 1048576).toFixed(1)} MB; Groq's free plan accepts up to 25 MB. Use a shorter clip or import a caption file.`);
+    const started = Date.now();
     try {
-      const out = await TRANSCRIBERS.groq.transcribe(key, blob, { type: 'audio/wav', filename: 'audio.wav' });
-      await log(ctx, { project_id: p.id, provider: 'groq', task: 'transcribe', model: 'whisper-large-v3-turbo', ok: true });
-      return out;
+      const { data: blob, error } = await ctx.supabase.storage.from(MEDIA_BUCKET).download(path);
+      if (error || !blob) throw fail(404, 'Could not read the uploaded audio.');
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const info = wavInfo(bytes);
+      const samples = wavSamples(bytes, info);
+      const chunks = speechChunks(samples, info.rate);
+      if (!chunks.length) return { segments: [], chunks: 0 };
+      if (chunks.length > 220) throw fail(400, 'This clip is too long to transcribe in one go (about 25 minutes max). Trim it or import a caption file.');
+      const language = /^[a-z]{2}$/.test(body.language || '') ? body.language : '';
+      const texts = await mapLimit(chunks, 6, (c) => def.transcribe(config, key, new Blob([wavSlice(samples, info.rate, c.start, c.end)], { type: 'audio/wav' }), { language }));
+      const segments = chunks.map((c, i) => ({ ...c, text: texts[i] })).filter((s) => s.text && !/^\W*$/.test(s.text));
+      await log(ctx, { project_id: p.id, provider: 'openai', task: 'transcribe', model: config.transcribeModel, ok: true });
+      return { segments, chunks: chunks.length, seconds: Math.round((Date.now() - started) / 1000) };
     } catch (e) {
-      await log(ctx, { project_id: p.id, provider: 'groq', task: 'transcribe', ok: false, error: e.message.slice(0, 500) });
-      throw fail(502, `Groq: ${e.message}`);
+      await log(ctx, { project_id: p.id, provider: 'openai', task: 'transcribe', model: config.transcribeModel, ok: false, error: e.message.slice(0, 500) });
+      throw e.status && e.status < 500 && !String(e.message).match(/^\d{3} /) ? e : fail(502, `OpenAI transcription: ${e.message}`);
     } finally {
       await ctx.supabase.storage.from(MEDIA_BUCKET).remove([path]);
     }
@@ -276,7 +365,7 @@ export default async function handler(req, res) {
     const route = routes.find(([m, re]) => m === req.method && re.test(path));
     if (!route) return send(res, 404, { error: 'Not found' });
     const ctx = await authenticate(req);
-    const body = req.method === 'GET' ? {} : await readBody(req);
+    const body = req.method === 'GET' ? {} : await readBody(req, path === '/ai/visuals' ? 4_400_000 : 1_000_000);
     const out = await route[2](ctx, body, path.match(route[1]).slice(1));
     send(res, 200, out);
   } catch (e) {

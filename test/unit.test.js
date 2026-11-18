@@ -8,7 +8,8 @@ import { rulePlan, ruleRefine } from '../shared/rules.js';
 import { buildAss, dimensions, buildRenderPlan } from '../shared/render-graph.js';
 import { parseProbe } from '../shared/probe.js';
 import { encrypt, decrypt } from '../server/lib/secrets.js';
-import { checkRouterUrl } from '../server/ai/providers.js';
+import { cleanGraphic, drawGraphics, graphicWindows, parseStat, formatStat, GRAPHIC_TYPES, frameGuides } from '../shared/graphics.js';
+import { speechChunks } from '../shared/speech.js';
 
 const assets = [{ id: 'a1', duration: 60 }];
 const segs = [
@@ -135,19 +136,6 @@ test('API keys are encrypted and decrypt only with the same secret', () => {
   assert.equal(decrypt('garbage'), null);
 });
 
-test('hosted app refuses private router URLs', () => {
-  const prev = process.env.VERCEL;
-  process.env.VERCEL = '1';
-  try {
-    assert.throws(() => checkRouterUrl('http://localhost:3001/v1'), /cannot reach a router on your own computer/);
-    assert.throws(() => checkRouterUrl('http://192.168.1.5:3001/v1'));
-    assert.equal(checkRouterUrl('https://router.example.com/v1/'), 'https://router.example.com/v1');
-  } finally {
-    if (prev === undefined) delete process.env.VERCEL;
-    else process.env.VERCEL = prev;
-  }
-});
-
 test('local folder: file kinds and caption sidecars', async () => {
   const { kindOf, findSidecar } = await import('../client/src/lib/localFolder.js');
   assert.equal(kindOf('Shoot.MP4'), 'video');
@@ -163,4 +151,96 @@ test('local folder: file kinds and caption sidecars', async () => {
   assert.equal(findSidecar(listing, 'Shoots/interview.mp4')?.relPath, 'Shoots/Interview.SRT');
   assert.equal(findSidecar(listing, 'interview.mp4'), null);
   assert.equal(findSidecar([], 'a.mp4'), null);
+});
+
+/** A CanvasRenderingContext2D stand-in that records calls (enough for the drawing code). */
+function fakeCtx() {
+  const calls = [];
+  const state = { font: '10px x' };
+  return new Proxy(state, {
+    get(t, k) {
+      if (k === 'calls') return calls;
+      if (k === 'measureText') return (txt) => ({ width: String(txt).length * (parseFloat(t.font) || 10) * 0.55 });
+      if (k in t) return t[k];
+      return (...args) => calls.push([k, ...args]);
+    },
+    set(t, k, v) {
+      t[k] = v;
+      return true;
+    },
+  });
+}
+
+test('motion graphics: ops validate and clamp, unknown types are refused', () => {
+  const { timeline: tl, errors } = applyOps(emptyTimeline(), [
+    { type: 'addGraphic', graphic: { type: 'list', text: 'Steps', items: ['a', 'b', 'c', 'd', 'e'], start: 2, x: 9, color: 'purple' } },
+    { type: 'addGraphic', graphic: { type: 'nope' } },
+  ]);
+  assert.equal(errors.length, 1);
+  const g = tl.graphics[0];
+  assert.equal(g.items.length, 4);
+  assert.equal(g.x, 0.92);
+  assert.equal(g.color, 'accent');
+  assert.equal(g.duration, GRAPHIC_TYPES.list.duration);
+  assert.equal(g.position, 'top');
+  const up = applyOps(tl, [{ type: 'updateGraphic', graphicId: g.id, patch: { type: 'stat', text: '$1,200', id: 'hijack' } }]).timeline.graphics[0];
+  assert.equal(up.id, g.id);
+  assert.equal(up.type, 'stat');
+  assert.equal(applyOps(tl, [{ type: 'deleteGraphic', graphicId: g.id }]).timeline.graphics.length, 0);
+  assert.throws(() => cleanGraphic({ type: 'x' }), /Unknown motion graphic/);
+});
+
+test('motion graphics: stat counting, time windows and drawing every type', () => {
+  const st = parseStat('$1,200+');
+  assert.deepEqual([st.prefix, st.value, st.suffix], ['$', 1200, '+']);
+  assert.equal(formatStat(st, 600), '$600+');
+  assert.equal(formatStat(parseStat('2.5x'), 1.5), '1.5x');
+  assert.equal(formatStat(parseStat('73%'), 73), '73%');
+  assert.equal(parseStat('no number'), null);
+  assert.deepEqual(graphicWindows([{ start: 1, duration: 2 }, { start: 3.2, duration: 1 }, { start: 8, duration: 5 }], 10), [{ start: 1, end: 4.2 }, { start: 8, end: 10 }]);
+  const guides = frameGuides(540, 960);
+  assert.ok(guides.anchors.bottom < 960 * 0.83 - 540 * 0.15, 'bottom graphics stay above the captions');
+  for (const type of Object.keys(GRAPHIC_TYPES)) {
+    const g = cleanGraphic({ type, text: type === 'stat' ? '90%' : 'Hello world', sub: 'sub', items: ['one', 'two'], start: 1, duration: 3 });
+    for (const t of [0.5, 1.0, 1.1, 1.5, 2.5, 3.9, 4.1]) {
+      const ctx = fakeCtx();
+      const n = drawGraphics(ctx, [g], t, 1080, 1920);
+      assert.equal(n, t >= 1 && t < 4 ? 1 : 0, `${type} at ${t}`);
+      if (n && t > 1.4) assert.ok(ctx.calls.length > 3, `${type} draws something at ${t}`);
+      for (const [, ...args] of ctx.calls) for (const a of args) if (typeof a === 'number') assert.ok(Number.isFinite(a), `${type} at ${t}: non-finite argument`);
+    }
+  }
+});
+
+test('speech chunking: finds spoken stretches and splits long ones at pauses', () => {
+  const rate = 16000;
+  const s = new Int16Array(rate * 30);
+  const on = (t) => (t > 1 && t < 3) || (t > 3.2 && t < 4) || (t > 6 && t < 26);
+  for (let i = 0; i < s.length; i++) {
+    const t = i / rate;
+    const dip = t > 15.5 && t < 15.7; // a breath inside the long run
+    s[i] = on(t) && !dip ? Math.round(8000 * Math.sin(t * 2 * Math.PI * 180)) : (i % 5) - 2;
+  }
+  const c = speechChunks(s, rate);
+  assert.ok(Math.abs(c[0].start - 1) < 0.2 && Math.abs(c[0].end - 4) < 0.2, 'short pause stays inside a line');
+  assert.ok(c.slice(1).every((x) => x.end - x.start <= 14.3), 'long speech is split');
+  assert.ok(c.some((x) => Math.abs(x.end - 15.6) < 0.4 || Math.abs(x.start - 15.6) < 0.4), 'split lands on the breath');
+  for (let i = 1; i < c.length; i++) assert.ok(c[i].start >= c[i - 1].end, 'no overlaps');
+  assert.deepEqual(speechChunks(new Int16Array(rate), rate), []);
+});
+
+test('motion graphics: new graphics are fitted around each other and existing ones', async () => {
+  const { fitGraphics } = await import('../shared/graphics.js');
+  const mk = (type, start, duration, position) => cleanGraphic({ type, start, duration, position });
+  const existing = [mk('keyword', 0, 2, 'center')];
+  const { kept, dropped } = fitGraphics(existing, [
+    mk('stat', 1, 2, 'center'), // clashes with an existing graphic → dropped
+    mk('chapter', 1, 2, 'top'), // different area → kept
+    mk('stat', 3, 3, 'center'),
+    mk('list', 4.5, 3, 'top'), // list covers top+center → shortens the stat at 3 s to 1.4 s
+    mk('keyword', 5, 1, 'center'), // still clashes with the list → dropped
+    mk('progress', 0, 9, 'top'), // the progress bar never clashes
+  ]);
+  assert.deepEqual(dropped.map((g) => `${g.type}@${g.start}`), ['stat@1', 'keyword@5']);
+  assert.deepEqual(kept.map((g) => `${g.type}@${g.start}/${g.duration}`).sort(), ['chapter@1/2', 'list@4.5/3', 'progress@0/9', 'stat@3/1.4']);
 });

@@ -148,7 +148,8 @@ export default function Landing() {
                 <li>Pause detection and measured pacing of your reference video (cuts per minute, shot length)</li>
                 <li>Work straight from a folder on your computer (e.g. Downloads): any file size, nothing uploaded, exports saved back into the folder (Chrome and Edge remember it)</li>
                 <li>Undo, redo and a full edit history; AI changes are previewed before they apply</li>
-                <li>Story planning with your own AI provider, or a transparent rule-based draft with no AI at all</li>
+                <li>ChatGPT or Claude (your own API key) plans the story, then looks at frames of your video to add B-roll and motion graphics; or use a transparent rule-based draft with no AI at all</li>
+                <li>Animated motion graphics: lower thirds, keyword pops, stat counters, checklists, callout arrows, progress bars and chapter tags, exported exactly as previewed</li>
               </ul>
             </div>
             <div>
@@ -169,8 +170,8 @@ export default function Landing() {
             <div className="stack-sm">
               <h3 style={{ fontSize: 20 }}>Your footage, your choice of AI</h3>
               <p className="text-2">
-                {BRAND} works without any AI provider, using a clearly labelled rule-based draft. When you connect one, such as a self-hosted FreeLLMAPI router using free-tier keys, or
-                your own OpenAI, Claude or Gemini key, it asks before sending a transcript and shows which model answered. Video files are never sent to a language model, and exports render on your own device.
+                {BRAND} works without any AI provider, using a clearly labelled rule-based draft. Connect ChatGPT or Claude with your own API key and it asks before sending
+                anything: the transcript for planning, a few small still frames for video analysis, or the audio track for transcription. The video file itself is never uploaded to a language model, and exports render on your own device.
               </p>
             </div>
           </div>

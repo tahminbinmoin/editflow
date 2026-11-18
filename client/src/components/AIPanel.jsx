@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Wand2, Send, Check, X, RefreshCw, Eye, EyeOff, Sparkles } from 'lucide-react';
+import { Wand2, Send, Check, X, RefreshCw, Eye, EyeOff, Sparkles, ScanEye } from 'lucide-react';
 import { RolePill, EngineBadge } from './ui.jsx';
 import { openWithLineOps } from '../lib/edits.js';
 import { formatTime } from '@shared/timeline.js';
+import { GRAPHIC_TYPES, GRAPHIC_COLORS } from '@shared/graphics.js';
 
-const EXAMPLES = ['Make the first three seconds faster', 'Make the music less intense', 'Use boxed captions', 'Clean up the audio', 'Add a title that teases the payoff', 'Cut it closer to 30 seconds'];
+const EXAMPLES = ['Make the first three seconds faster', 'Add a stat graphic when a number is mentioned', 'Use yellow for all graphics', 'Make the music less intense', 'Use boxed captions', 'Cut it closer to 30 seconds'];
 
 function Section({ title, children, open = true, count }) {
   return (
@@ -31,7 +32,7 @@ function Proposal({ project, act, preview, setPreview }) {
     <div className="proposal stack" ref={ref} style={{ scrollMarginTop: 12 }}>
       <div className="spread">
         <span className="pill warm">
-          <Sparkles size={12} /> {p.kind === 'firstCut' ? 'Proposed first cut' : 'Proposed change'}
+          <Sparkles size={12} /> {p.kind === 'firstCut' ? 'Proposed first cut' : p.kind === 'visuals' ? 'Proposed B-roll & graphics' : 'Proposed change'}
         </span>
         <EngineBadge meta={p.meta} />
       </div>
@@ -53,6 +54,18 @@ function Proposal({ project, act, preview, setPreview }) {
           ))}
         </div>
       )}
+      {p.scenes?.length > 0 && (
+        <details className="disclosure">
+          <summary>What the AI saw ({p.scenes.length} scenes)</summary>
+          <div className="stack-sm">
+            {p.scenes.map((sc, i) => (
+              <div key={i} className="tiny text-2">
+                <span className="mono muted">{formatTime(sc.start)}</span> {sc.what}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
       {p.notes?.length > 0 && p.notes.map((n, i) => <div key={i} className="notice info">{n}</div>)}
       {p.plan?.warnings?.length > 0 && <div className="tiny muted">{p.plan.warnings.join(' · ')}</div>}
       <div className="row wrap">
@@ -71,7 +84,7 @@ function Proposal({ project, act, preview, setPreview }) {
   );
 }
 
-export default function AIPanel({ project, engine, act, busy, ops, preview, setPreview, onSeek }) {
+export default function AIPanel({ project, engine, act, busy, status, ops, preview, setPreview, onSeek }) {
   const [req, setReq] = useState('');
   const plan = project.plan;
   const tl = project.timeline;
@@ -84,6 +97,10 @@ export default function AIPanel({ project, engine, act, busy, ops, preview, setP
   const firstCut = async (forceRules) => {
     if (await act.firstCut(forceRules)) setPreview(true);
   };
+  const analyze = async () => {
+    if (await act.analyzeVisuals()) setPreview(true);
+  };
+  const graphics = tl.graphics || [];
   const refine = async (text) => {
     const r = (text ?? req).trim();
     if (!r) return;
@@ -127,6 +144,34 @@ export default function AIPanel({ project, engine, act, busy, ops, preview, setP
           </p>
         </div>
       ) : null}
+
+      {tl.clips.length > 0 && !project.pending && (
+        <div className="card raised stack-sm">
+          <div className="row">
+            <ScanEye color="var(--accent)" size={20} />
+            <b>B-roll & motion graphics from the video</b>
+          </div>
+          <p className="small text-2">
+            {rules
+              ? 'Connect ChatGPT or Claude to have it look at your cut and suggest cutaways and animated graphics.'
+              : `${engine?.name} looks at still frames from your cut, your timed lines and your B-roll clips, then proposes cutaways and animated graphics (lower thirds, stats, keywords, checklists, callouts) timed to what’s said. You preview before applying.`}
+          </p>
+          {busy === 'visuals' ? (
+            <div className="row small text-2">
+              <span className="spinner" /> {status || 'Analysing…'}
+            </div>
+          ) : rules ? (
+            <Link to="/app/settings" className="btn sm" style={{ alignSelf: 'flex-start' }}>
+              Connect ChatGPT or Claude
+            </Link>
+          ) : (
+            <button className={`btn ${graphics.length ? '' : 'primary'} block`} onClick={analyze} disabled={!!busy}>
+              <ScanEye size={16} /> {graphics.length || tl.broll.some((b) => b.assetId) ? 'Analyse again' : 'Analyse video'}
+            </button>
+          )}
+          {!rules && <p className="tiny muted">Sends about 6–20 small still frames (not the video file) after you confirm. Billed to your {engine?.name} API account.</p>}
+        </div>
+      )}
 
       {plan && (
         <div className="card tight">
@@ -184,6 +229,21 @@ export default function AIPanel({ project, engine, act, busy, ops, preview, setP
                     </option>
                   ))}
                 </select>
+              </div>
+            ))}
+          </Section>
+          <Section title="Motion graphics" count={graphics.length} open={graphics.length > 0}>
+            {graphics.length === 0 && <p className="tiny muted">None yet. Use “Analyse video”, or add one in Let me edit.</p>}
+            {graphics.map((g) => (
+              <div key={g.id} className="spread small">
+                <span>
+                  <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, background: GRAPHIC_COLORS[g.color]?.hex, marginRight: 6 }} />
+                  <b>{GRAPHIC_TYPES[g.type]?.label}</b> <span className="text-2">{g.text || g.items?.[0] || ''}</span>
+                  {g.reason && <div className="tiny muted">{g.reason}</div>}
+                </span>
+                <button className="btn xs ghost mono" onClick={() => onSeek(g.start + 0.6)}>
+                  {formatTime(g.start)}
+                </button>
               </div>
             ))}
           </Section>
@@ -282,7 +342,7 @@ export default function AIPanel({ project, engine, act, busy, ops, preview, setP
               ))}
             </div>
           )}
-          {rules && <p className="tiny muted">Rule-based mode understands a few phrasings (faster, music quieter/louder, captions, clean audio, fades). Connect an AI provider for anything else.</p>}
+          {rules && <p className="tiny muted">Rule-based mode understands a few phrasings (faster, music quieter/louder, captions, clean audio, fades). Connect ChatGPT or Claude for anything else.</p>}
         </div>
       )}
 

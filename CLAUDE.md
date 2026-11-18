@@ -3,7 +3,8 @@
 Read `docs/DEVELOPING.md` first: architecture, data model and recipes for adding features.
 
 Essentials:
-- Stack: React + Vite (plain JSX) on Vercel; Supabase for Auth, Postgres (RLS on every table) and Storage; one Vercel function (`api/index.js` → `server/api/handler.js`) for AI calls; ffmpeg.wasm renders exports in the browser.
+- Stack: React + Vite (plain JSX) on Vercel; Supabase for Auth, Postgres (RLS on every table) and Storage; one Vercel function (`api/index.js` → `server/api/handler.js`) for AI calls (ChatGPT via the OpenAI API, Claude via the Anthropic API, users' own keys); ffmpeg.wasm renders exports in the browser.
+- Motion graphics are drawn by `shared/graphics.js` with Canvas 2D — one implementation for preview and export. Don't add a second renderer.
 - The edit is data: every change is an op in `shared/timeline.js`. New editing features = op + render (`shared/render-graph.js`) + preview (`client/src/components/Player.jsx`) + UI control.
 - Client state changes go through `mutate`/`commit` in `client/src/lib/useProject.js` (never write the project from two places).
 - The API runs every query with the user's own Supabase session (RLS applies). AI calls go through `runJsonTask` (consent, JSON repair, logging). Never present rule-based output as AI.

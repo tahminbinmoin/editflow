@@ -15,7 +15,7 @@ import { parseProbe } from '../shared/probe.js';
 
 const root = path.resolve('client/public');
 
-test('sample project renders to a vertical MP4 of the right length and loudness', { timeout: 180_000 }, () => {
+test('sample project renders to a vertical MP4 of the right length and loudness, with motion graphics', { timeout: 180_000 }, () => {
   const m = JSON.parse(fs.readFileSync(path.join(root, 'sample', 'manifest.json'), 'utf8'));
   const data = newProjectData({ aspect: '9:16', targetLength: 35 });
   data.assets = m.assets.map((a, i) => ({ ...a, id: `a${i}` }));
@@ -28,7 +28,14 @@ test('sample project renders to a vertical MP4 of the right length and loudness'
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'editflow-render-'));
   fs.mkdirSync(path.join(dir, 'fonts'));
   fs.copyFileSync('assets/fonts/Poppins-Bold.ttf', path.join(dir, 'fonts', 'Poppins-Bold.ttf'));
-  const rp = buildRenderPlan({ timeline, assets: data.assets }, { aspect: '9:16', quality: 'draft', outName: 'out.mp4', inputPath: (a) => path.join(root, a.url), fontsDir: 'fonts' });
+  // Motion graphics arrive as PNG frames + an ffconcat list (the browser draws them with canvas).
+  // Here: a solid magenta square held for 0.5 s, then a cyan one, shown from 1.0 s to 2.0 s.
+  for (const [n, c] of [['g0_00000.png', 'magenta'], ['g0_00001.png', 'cyan']]) {
+    const r = spawnSync(ffmpeg, ['-hide_banner', '-y', '-f', 'lavfi', '-i', `color=c=${c}:s=200x200,format=rgba,pad=540:960:100:100:color=black@0`, '-frames:v', '1', n], { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr.slice(-400));
+  }
+  fs.writeFileSync(path.join(dir, 'graphics_0.txt'), "ffconcat version 1.0\nfile 'g0_00000.png'\nduration 0.5\nfile 'g0_00001.png'\nduration 0.5\nfile 'g0_00001.png'\n");
+  const rp = buildRenderPlan({ timeline, assets: data.assets }, { aspect: '9:16', quality: 'draft', outName: 'out.mp4', inputPath: (a) => path.join(root, a.url), fontsDir: 'fonts', graphics: [{ listName: 'graphics_0.txt', start: 1, end: 2 }] });
   fs.writeFileSync(path.join(dir, rp.assName), rp.ass);
   fs.writeFileSync(path.join(dir, rp.listName), rp.list);
   for (const sg of [...rp.segments.map((s) => s.args), rp.final]) {
@@ -42,5 +49,12 @@ test('sample project renders to a vertical MP4 of the right length and loudness'
   const loud = spawnSync(ffmpeg, ['-hide_banner', '-i', path.join(dir, 'out.mp4'), '-af', 'ebur128', '-f', 'null', '-'], { encoding: 'utf8' }).stderr;
   const lufs = Number(loud.match(/I:\s*(-?[\d.]+) LUFS/g).pop().match(/-?[\d.]+/)[0]);
   assert.ok(lufs > -15.5 && lufs < -12.5, `loudness ${lufs}`);
+  const px = (t) => [...spawnSync(ffmpeg, ['-hide_banner', '-ss', String(t), '-i', path.join(dir, 'out.mp4'), '-frames:v', '1', '-vf', 'crop=2:2:200:200', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 1e6 }).stdout];
+  const [r1, g1, b1] = px(1.25);
+  assert.ok(r1 > 200 && g1 < 80 && b1 > 200, `magenta graphic at 1.25s, got ${r1},${g1},${b1}`);
+  const [r2, g2, b2] = px(1.75);
+  assert.ok(r2 < 80 && g2 > 200 && b2 > 200, `cyan graphic at 1.75s, got ${r2},${g2},${b2}`);
+  const [r3, g3, b3] = px(2.6);
+  assert.ok(!(g3 > 200 && b3 > 200 && r3 < 80), 'graphic gone after its window');
   fs.rmSync(dir, { recursive: true, force: true });
 });

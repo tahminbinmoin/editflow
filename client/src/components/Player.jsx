@@ -4,6 +4,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Play, Pause, SkipBack } from 'lucide-react';
 import { layout, timelineCaptions, ASPECTS, formatTime } from '@shared/timeline.js';
+import { drawGraphics } from '@shared/graphics.js';
+import { ensureGraphicsFont } from '../lib/graphicsFrames.js';
 
 export default function Player({ urls, timeline, assets, time, onTime, playing, setPlaying, badge }) {
   const main = useRef();
@@ -11,6 +13,8 @@ export default function Player({ urls, timeline, assets, time, onTime, playing, 
   const music = useRef();
   const raf = useRef();
   const stageRef = useRef();
+  const gfx = useRef();
+  const [fontReady, setFontReady] = useState(false);
   const [box, setBox] = useState({ w: 300, h: 533 });
   const { clips, duration } = useMemo(() => layout(timeline), [timeline]);
   const caps = useMemo(() => timelineCaptions(timeline), [timeline]);
@@ -34,6 +38,24 @@ export default function Player({ urls, timeline, assets, time, onTime, playing, 
     ro.observe(el);
     return () => ro.disconnect();
   }, [aspect.w, aspect.h]);
+
+  useEffect(() => {
+    ensureGraphicsFont().then(() => setFontReady(true));
+  }, []);
+
+  // Motion graphics: drawn with the same code the export uses (shared/graphics.js).
+  const graphics = timeline.graphics || [];
+  useEffect(() => {
+    const c = gfx.current;
+    if (!c) return;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const W = Math.round(box.w * dpr);
+    const H = Math.round(box.h * dpr);
+    if (c.width !== W || c.height !== H) ((c.width = W), (c.height = H));
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+    drawGraphics(ctx, graphics, time, W, H);
+  }, [time, graphics, box.w, box.h, fontReady]);
 
   const clipAt = (t) => {
     const i = clips.findIndex((c) => t >= c.tlStart && t < c.tlEnd);
@@ -154,6 +176,7 @@ export default function Player({ urls, timeline, assets, time, onTime, playing, 
             <video ref={main} playsInline preload="auto" style={{ opacity: curAsset && !curAsset.hasVideo ? 0 : 1 }} />
             <video ref={broll} playsInline muted preload="auto" style={{ opacity: brollAsset ? 1 : 0 }} />
             <audio ref={music} preload="auto" />
+            <canvas ref={gfx} className="gfx-layer" style={{ width: box.w, height: box.h }} aria-hidden />
             <div className="layer">
               {activeBroll && !brollAsset && (
                 <div className="broll-tag">

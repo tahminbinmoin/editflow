@@ -13,7 +13,7 @@
     "preview": "vite preview",
     "test": "node --test test/unit.test.js test/api.test.js test/render.test.js",
     "sample": "node scripts/make-sample.mjs",
-    "mock:freellmapi": "node test/mock-freellmapi.js",
+    "mock:ai": "node test/mock-ai.js",
     "mock:supabase": "node test/mock-supabase.js"
   },
   "dependencies": {

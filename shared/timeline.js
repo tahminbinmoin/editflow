@@ -6,7 +6,8 @@
 // Time conventions:
 //   clip.in / clip.out ............ seconds in the SOURCE asset
 //   caption.start / caption.end ... seconds in the SOURCE asset (captions follow their clip)
-//   overlay / broll start ......... seconds on the TIMELINE (intentionally placed)
+//   overlay / broll / graphic start  seconds on the TIMELINE (intentionally placed)
+import { cleanGraphic, GRAPHIC_TYPES } from './graphics.js';
 
 export const ASPECTS = {
   '9:16': { label: 'Vertical 9:16', hint: 'TikTok, Reels, Shorts', w: 9, h: 16 },
@@ -53,6 +54,7 @@ export function emptyTimeline(aspect = '9:16') {
     clips: [],
     captions: { enabled: true, style: 'bold', position: 'lower', items: [] },
     overlays: [],
+    graphics: [],
     broll: [],
     music: { assetId: null, mood: '', volume: 0.22, duck: true, notes: '' },
     audio: { normalize: true, denoise: false, voiceVolume: 1 },
@@ -68,7 +70,7 @@ export function normalizeTimeline(tl) {
   t.captions.items = Array.isArray(t.captions.items) ? t.captions.items : [];
   t.music = { ...base.music, ...(tl?.music || {}) };
   t.audio = { ...base.audio, ...(tl?.audio || {}) };
-  for (const k of ['clips', 'overlays', 'broll', 'sound']) t[k] = Array.isArray(t[k]) ? t[k] : [];
+  for (const k of ['clips', 'overlays', 'graphics', 'broll', 'sound']) t[k] = Array.isArray(t[k]) ? t[k] : [];
   return t;
 }
 
@@ -256,6 +258,24 @@ export function applyOp(tlIn, op, ctx = {}) {
       tl.overlays.splice(findIndex(tl.overlays, op.overlayId, 'Text overlay'), 1);
       break;
     }
+    case 'addGraphic': {
+      const g = cleanGraphic(op.graphic || {});
+      g.id = op.graphic?.id || uid('gfx');
+      tl.graphics.push(g);
+      tl.graphics.sort((a, b) => a.start - b.start);
+      break;
+    }
+    case 'updateGraphic': {
+      const i = findIndex(tl.graphics, op.graphicId, 'Motion graphic');
+      const patch = pick(op.patch, ['type', 'start', 'duration', 'text', 'sub', 'items', 'x', 'y', 'color', 'position']);
+      tl.graphics[i] = { ...cleanGraphic(patch, tl.graphics[i]), id: tl.graphics[i].id };
+      tl.graphics.sort((a, b) => a.start - b.start);
+      break;
+    }
+    case 'deleteGraphic': {
+      tl.graphics.splice(findIndex(tl.graphics, op.graphicId, 'Motion graphic'), 1);
+      break;
+    }
     case 'addBroll': {
       const b = op.broll || {};
       tl.broll.push({
@@ -373,6 +393,12 @@ export function describeOp(op, tl) {
       return 'Edit a text overlay';
     case 'deleteOverlay':
       return 'Remove a text overlay';
+    case 'addGraphic':
+      return `Add ${GRAPHIC_TYPES[op.graphic?.type]?.label.toLowerCase() || 'motion graphic'}${op.graphic?.text ? ` "${op.graphic.text}"` : ''} at ${fmt(op.graphic?.start)}`;
+    case 'updateGraphic':
+      return 'Edit a motion graphic';
+    case 'deleteGraphic':
+      return 'Remove a motion graphic';
     case 'addBroll':
       return `Suggest B-roll at ${fmt(op.broll?.start)}: ${op.broll?.description}`;
     case 'updateBroll':
@@ -407,7 +433,9 @@ export function diffSummary(before, after) {
   const na = normalizeTimeline(before);
   const nb = normalizeTimeline(after);
   if (na.overlays.length !== nb.overlays.length) lines.push(`Text overlays: ${na.overlays.length} → ${nb.overlays.length}`);
+  if (na.graphics.length !== nb.graphics.length) lines.push(`Motion graphics: ${na.graphics.length} → ${nb.graphics.length}`);
   if (na.broll.length !== nb.broll.length) lines.push(`B-roll shots: ${na.broll.length} → ${nb.broll.length}`);
+  else if (na.broll.filter((b) => b.assetId).length !== nb.broll.filter((b) => b.assetId).length) lines.push(`B-roll with footage: ${na.broll.filter((b) => b.assetId).length} → ${nb.broll.filter((b) => b.assetId).length}`);
   if (JSON.stringify(na.music) !== JSON.stringify(nb.music)) lines.push('Music settings changed');
   if (JSON.stringify(na.audio) !== JSON.stringify(nb.audio)) lines.push('Voice audio settings changed');
   if (JSON.stringify(na.captions) !== JSON.stringify(nb.captions)) lines.push('Captions changed');

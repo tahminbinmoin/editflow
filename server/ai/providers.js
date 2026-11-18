@@ -1,9 +1,15 @@
-// AI provider adapters. Each adapter has the same small interface so the product never
-// depends on one model vendor:  test(cfg, key) → { ok, models, message, quota }
-//                              chat(cfg, key, { system, user, json }) → { text, model, routedVia, usage }
-// Keys are decrypted on the server only; they never reach the browser.
+// AI provider adapters: ChatGPT (OpenAI API) and Claude (Anthropic API). Both have the same
+// small interface, so the product never depends on one vendor:
+//   test(cfg, key) → { ok, models, message }
+//   chat(cfg, key, { system, user, json, images }) → { text, model, routedVia, usage }
+//     images: [{ label, data (base64 JPEG), mime }] — still frames for video analysis
+// OpenAI also transcribes speech (transcribe()). Keys are decrypted on the server only.
+//
+// Base URLs can be overridden for tests (OPENAI_BASE_URL / ANTHROPIC_BASE_URL).
 
-const TIMEOUT_MS = 150_000;
+const TIMEOUT_MS = 170_000;
+const OPENAI = () => (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
+const ANTHROPIC = () => (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1').replace(/\/+$/, '');
 
 async function http(url, { method = 'GET', headers = {}, body, timeout = TIMEOUT_MS } = {}) {
   let res;
@@ -15,7 +21,7 @@ async function http(url, { method = 'GET', headers = {}, body, timeout = TIMEOUT
       signal: AbortSignal.timeout(timeout),
     });
   } catch (e) {
-    const reason = e.name === 'TimeoutError' ? 'timed out' : e.cause?.code === 'ECONNREFUSED' ? 'connection refused — is it running?' : e.message;
+    const reason = e.name === 'TimeoutError' ? 'timed out' : e.cause?.code === 'ECONNREFUSED' ? 'connection refused' : e.message;
     throw Object.assign(new Error(`Could not reach ${new URL(url).host}: ${reason}`), { status: 0 });
   }
   const text = await res.text();
@@ -29,235 +35,119 @@ async function http(url, { method = 'GET', headers = {}, body, timeout = TIMEOUT
       res.status === 401 || res.status === 403
         ? ' Check the API key.'
         : res.status === 429
-          ? ' The provider rate limit or quota was reached — wait and retry, or switch provider.'
+          ? ' The rate limit or your API credit was reached. Check billing on the provider’s dashboard, wait, or switch provider.'
           : res.status === 402
-            ? ' This provider needs billing/credits on your account.'
+            ? ' Add API credit on the provider’s dashboard.'
             : '';
     throw Object.assign(new Error(`${res.status} ${typeof msg === 'string' ? msg : JSON.stringify(msg)}${hint}`), { status: res.status });
   }
   return { json, text, headers: res.headers };
 }
 
-const trimSlash = (u) => String(u || '').replace(/\/+$/, '');
-
-/** On the hosted app, refuse private/loopback router URLs (they can't be reached and would be an SSRF vector). */
-export function checkRouterUrl(raw) {
-  let u;
-  try {
-    u = new URL(raw);
-  } catch {
-    throw Object.assign(new Error('Router URL is not a valid URL.'), { status: 400 });
-  }
-  if (!/^https?:$/.test(u.protocol)) throw Object.assign(new Error('Router URL must start with http:// or https://'), { status: 400 });
-  const host = u.hostname.toLowerCase();
-  const isPrivate =
-    host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal') || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^169\.254\./.test(host) || host === '0.0.0.0' || host === '[::1]' || host.startsWith('[fc') || host.startsWith('[fd');
-  if (isPrivate && process.env.VERCEL) {
-    throw Object.assign(
-      new Error('The hosted app cannot reach a router on your own computer (localhost or a private address). Deploy FreeLLMAPI somewhere public with https, or run Editflow locally to use a local router.'),
-      { status: 400 },
-    );
-  }
-  return trimSlash(u.toString());
-}
+const SUBSCRIPTION_NOTE =
+  'A ChatGPT Plus/Pro or Claude Pro/Max subscription does not cover requests from other apps: Editflow uses an API key, billed per request on the provider’s developer platform.';
 
 export const PROVIDERS = {
-  freellmapi: {
-    id: 'freellmapi',
-    name: 'FreeLLMAPI router',
-    tagline: 'Free-tier models through your own self-hosted router',
-    recommended: true,
-    billing: {
-      label: 'Free tiers of keys you add',
-      tone: 'free',
-      detail:
-        'Editflow calls your own FreeLLMAPI router (github.com/tashfeenahmed/freellmapi). It routes each request to a provider key you added there (Groq, Gemini, Mistral, OpenRouter…) within that provider’s free-tier limits, and fails over when one is rate-limited. Editflow adds no charge. The router’s authors describe it as for personal experimentation, not production: use it for demos and prototyping, and switch to paid API keys before serving paying customers.',
-    },
-    dataUse:
-      'Your router may forward a request to any provider in its fallback chain. Some free tiers (for example Google’s Gemini free tier) may use prompts to improve their products. Editflow shows which provider actually answered each request.',
-    fields: [
-      { key: 'baseUrl', label: 'Router URL', placeholder: 'https://your-router.example.com/v1', help: 'Where your FreeLLMAPI router runs. On the hosted app it must be a public https URL; localhost only works when you run Editflow on the same computer.' },
-      { key: 'model', label: 'Model', placeholder: 'auto:smart', help: '“auto:smart” prefers the most capable free model; “auto:fast” prefers speed; or enter a model ID from the list.' },
-    ],
-    secretLabel: 'Unified key (freellmapi-…)',
-    defaults: () => ({ baseUrl: process.env.FREELLMAPI_BASE_URL || 'http://localhost:3001/v1', model: 'auto:smart' }),
-    async test(cfg, key) {
-      const base = checkRouterUrl(cfg.baseUrl);
-      const auth = { authorization: `Bearer ${key}` };
-      const { json } = await http(`${base}/models?execution_status=ready`, { headers: auth, timeout: 15000 });
-      const models = (json?.data || []).map((m) => m.id).filter(Boolean);
-      let quota = null;
-      try {
-        const u = await http(`${base}/usage`, { headers: auth, timeout: 8000 });
-        quota = u.json;
-      } catch {}
-      const real = models.filter((m) => !/^auto|fusion/.test(m));
-      return {
-        ok: true,
-        models: ['auto', 'auto:smart', 'auto:fast', 'auto:reliable', ...real.slice(0, 300)],
-        message: real.length
-          ? `Connected. ${real.length} model${real.length === 1 ? '' : 's'} ready to serve requests right now.`
-          : 'Connected, but no models are ready. Add provider keys in the FreeLLMAPI dashboard (Keys page).',
-        quota,
-      };
-    },
-    async chat(cfg, key, { system, user }) {
-      const base = checkRouterUrl(cfg.baseUrl);
-      const { json, headers } = await http(`${base}/chat/completions`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${key}` },
-        body: {
-          model: cfg.model || 'auto:smart',
-          temperature: 0.4,
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: user },
-          ],
-        },
-      });
-      return {
-        text: json?.choices?.[0]?.message?.content || '',
-        model: json?.model || cfg.model,
-        routedVia: headers.get('x-routed-via') || null,
-        fallbackAttempts: Number(headers.get('x-fallback-attempts') || 0),
-        usage: { input: json?.usage?.prompt_tokens, output: json?.usage?.completion_tokens },
-      };
-    },
-  },
-
   openai: {
     id: 'openai',
-    name: 'OpenAI (ChatGPT models)',
-    tagline: 'Direct OpenAI API with your own key',
+    name: 'ChatGPT (OpenAI)',
+    short: 'ChatGPT',
+    tagline: 'OpenAI’s GPT models through your own OpenAI API key',
     billing: {
-      label: 'Paid API billing',
+      label: 'API key · pay per use',
       tone: 'paid',
       detail:
-        'Requires an OpenAI API account with billing at platform.openai.com. ChatGPT app subscriptions are billed separately from the API — check your platform billing page for any API credits on your account before running requests.',
+        'Create a key at platform.openai.com/api-keys and add credit under Billing. The ChatGPT Plus/Pro subscription is billed separately and isn’t used here. Some ChatGPT Pro and Business plans include promotional API credits; check your OpenAI billing page.',
     },
-    dataUse: 'OpenAI states API data is not used for training by default. Review your organization’s data controls at platform.openai.com.',
-    fields: [{ key: 'model', label: 'Model', placeholder: 'Load models after saving your key', help: 'Pick a model from your account’s list.' }],
-    secretLabel: 'OpenAI API key',
-    defaults: () => ({ model: '' }),
+    dataUse: 'OpenAI states that API data is not used to train its models by default. Review your organisation’s data controls at platform.openai.com.',
+    fields: [
+      { key: 'model', label: 'Model', placeholder: 'gpt-6.2-sol', help: 'Used for planning and video analysis. Must accept images for video analysis (current GPT models do).' },
+      { key: 'transcribeModel', label: 'Transcription model', placeholder: 'gpt-transcribe', help: 'Speech-to-text model for the Transcript tab.' },
+    ],
+    secretLabel: 'OpenAI API key (sk-…)',
+    vision: true,
+    defaults: () => ({ model: 'gpt-6.2-sol', transcribeModel: 'gpt-transcribe' }),
     async test(cfg, key) {
-      const { json } = await http('https://api.openai.com/v1/models', { headers: { authorization: `Bearer ${key}` }, timeout: 15000 });
-      const models = (json?.data || []).map((m) => m.id).filter((id) => /^(gpt|o\d|chatgpt)/.test(id)).sort();
-      return { ok: true, models, message: `Key accepted. ${models.length} chat models visible. Requests are billed to your OpenAI account.` };
+      const { json } = await http(`${OPENAI()}/models`, { headers: { authorization: `Bearer ${key}` }, timeout: 15000 });
+      const ids = (json?.data || []).map((m) => m.id);
+      const models = ids.filter((id) => /^(gpt|o\d|chatgpt)/.test(id) && !/transcribe|realtime|audio|tts|image|search|embed|live|whisper|moderation|cyber/.test(id)).sort().reverse();
+      const has = (m) => !m || ids.includes(m);
+      const warn = [!has(cfg.model) && `the model “${cfg.model}” isn’t on your account`, !has(cfg.transcribeModel) && `the transcription model “${cfg.transcribeModel}” isn’t on your account`].filter(Boolean);
+      return {
+        ok: true,
+        models,
+        message: `Key accepted. ${models.length} chat models visible.${warn.length ? ` Note: ${warn.join('; ')}. Pick another below.` : ''} Requests are billed to your OpenAI API account.`,
+      };
     },
-    async chat(cfg, key, { system, user, json: wantJson }) {
-      if (!cfg.model) throw new Error('Choose an OpenAI model in AI settings first.');
-      const { json } = await http('https://api.openai.com/v1/chat/completions', {
+    async chat(cfg, key, { system, user, json: wantJson, images = [] }) {
+      const content = images.length
+        ? [{ type: 'text', text: user }, ...images.flatMap((im) => [{ type: 'text', text: im.label }, { type: 'image_url', image_url: { url: `data:${im.mime || 'image/jpeg'};base64,${im.data}`, detail: 'low' } }])]
+        : user;
+      const { json } = await http(`${OPENAI()}/chat/completions`, {
         method: 'POST',
         headers: { authorization: `Bearer ${key}` },
         body: {
-          model: cfg.model,
+          model: cfg.model || 'gpt-6.2-sol',
           messages: [
             { role: 'system', content: system },
-            { role: 'user', content: user },
+            { role: 'user', content },
           ],
           ...(wantJson ? { response_format: { type: 'json_object' } } : {}),
         },
       });
-      return { text: json?.choices?.[0]?.message?.content || '', model: json?.model, routedVia: `openai/${json?.model}`, usage: { input: json?.usage?.prompt_tokens, output: json?.usage?.completion_tokens } };
+      return { text: json?.choices?.[0]?.message?.content || '', model: json?.model, routedVia: `openai/${json?.model || cfg.model}`, usage: { input: json?.usage?.prompt_tokens, output: json?.usage?.completion_tokens } };
+    },
+    /** Speech to text for one short chunk of audio (WAV). Returns plain text. */
+    async transcribe(cfg, key, audio, { prompt = '', language = '' } = {}) {
+      const form = new FormData();
+      form.append('file', audio, 'speech.wav');
+      form.append('model', cfg.transcribeModel || 'gpt-transcribe');
+      form.append('response_format', 'json');
+      if (language) form.append('language', language);
+      if (prompt) form.append('prompt', prompt.slice(-400));
+      const { json } = await http(`${OPENAI()}/audio/transcriptions`, { method: 'POST', headers: { authorization: `Bearer ${key}` }, body: form, timeout: 120_000 });
+      return String(json?.text || '').trim();
     },
   },
 
   anthropic: {
     id: 'anthropic',
-    name: 'Anthropic (Claude models)',
-    tagline: 'Direct Claude API with your own key',
+    name: 'Claude (Anthropic)',
+    short: 'Claude',
+    tagline: 'Anthropic’s Claude models through your own Anthropic API key',
     billing: {
-      label: 'Paid API billing',
+      label: 'API key · pay per use',
       tone: 'paid',
-      detail: 'Requires an Anthropic Console account (console.anthropic.com) with API credits. Claude.ai app subscriptions are separate from API usage.',
+      detail:
+        'Create a key at console.anthropic.com and add credit under Billing. Anthropic doesn’t allow a Claude Pro/Max subscription to power other apps, so the subscription isn’t used here.',
     },
-    dataUse: 'Anthropic’s commercial terms state API inputs and outputs are not used to train models by default. Review the current terms in the Anthropic Console.',
-    fields: [{ key: 'model', label: 'Model', placeholder: 'claude-sonnet-5-5', help: 'Load your available models after saving the key.' }],
-    secretLabel: 'Anthropic API key',
+    dataUse: 'Anthropic’s commercial terms state that API inputs and outputs are not used to train models by default. Review the current terms in the Anthropic Console.',
+    fields: [{ key: 'model', label: 'Model', placeholder: 'claude-sonnet-5-5', help: 'Used for planning and video analysis (Claude models accept images).' }],
+    secretLabel: 'Anthropic API key (sk-ant-…)',
+    vision: true,
     defaults: () => ({ model: 'claude-sonnet-5-5' }),
     async test(cfg, key) {
-      const { json } = await http('https://api.anthropic.com/v1/models?limit=100', {
-        headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-        timeout: 15000,
-      });
+      const { json } = await http(`${ANTHROPIC()}/models?limit=100`, { headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, timeout: 15000 });
       const models = (json?.data || []).map((m) => m.id);
-      return { ok: true, models, message: `Key accepted. ${models.length} models visible. Requests are billed to your Anthropic account.` };
+      const warn = cfg.model && models.length && !models.includes(cfg.model) ? ` Note: “${cfg.model}” isn’t on your account; pick another below.` : '';
+      return { ok: true, models, message: `Key accepted. ${models.length} models visible.${warn} Requests are billed to your Anthropic API account.` };
     },
-    async chat(cfg, key, { system, user }) {
-      const { json } = await http('https://api.anthropic.com/v1/messages', {
+    async chat(cfg, key, { system, user, images = [] }) {
+      const content = images.length
+        ? [...images.flatMap((im) => [{ type: 'text', text: im.label }, { type: 'image', source: { type: 'base64', media_type: im.mime || 'image/jpeg', data: im.data } }]), { type: 'text', text: user }]
+        : user;
+      const { json } = await http(`${ANTHROPIC()}/messages`, {
         method: 'POST',
         headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-        body: { model: cfg.model || 'claude-sonnet-5-5', max_tokens: 8000, system, messages: [{ role: 'user', content: user }] },
+        body: { model: cfg.model || 'claude-sonnet-5-5', max_tokens: 8000, system, messages: [{ role: 'user', content }] },
       });
       const text = (json?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
-      return { text, model: json?.model, routedVia: `anthropic/${json?.model}`, usage: { input: json?.usage?.input_tokens, output: json?.usage?.output_tokens } };
-    },
-  },
-
-  gemini: {
-    id: 'gemini',
-    name: 'Google Gemini',
-    tagline: 'Direct Gemini API with a Google AI Studio key',
-    billing: {
-      label: 'Free tier available (rate-limited)',
-      tone: 'mixed',
-      detail:
-        'Google AI Studio keys start on a rate-limited free tier for some models; higher limits need a billing account. Free-tier limits change often — check ai.google.dev/gemini-api/docs/rate-limits. The free tier is not available in every region.',
-    },
-    dataUse: 'Google’s pricing page states free-tier prompts and responses may be used to improve Google products; paid-tier data is not. Avoid sending sensitive transcripts on the free tier.',
-    fields: [{ key: 'model', label: 'Model', placeholder: 'Load models after saving your key', help: 'Pick a model your key can use.' }],
-    secretLabel: 'Gemini API key',
-    defaults: () => ({ model: '' }),
-    async test(cfg, key) {
-      const { json } = await http('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key }, timeout: 15000 });
-      const models = (json?.models || [])
-        .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
-        .map((m) => m.name.replace(/^models\//, ''));
-      return { ok: true, models, message: `Key accepted. ${models.length} models visible. Usage depends on your key’s tier.` };
-    },
-    async chat(cfg, key, { system, user, json: wantJson }) {
-      if (!cfg.model) throw new Error('Choose a Gemini model in AI settings first.');
-      const { json } = await http(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cfg.model)}:generateContent`, {
-        method: 'POST',
-        headers: { 'x-goog-api-key': key },
-        body: {
-          systemInstruction: { parts: [{ text: system }] },
-          contents: [{ role: 'user', parts: [{ text: user }] }],
-          generationConfig: { temperature: 0.4, ...(wantJson ? { responseMimeType: 'application/json' } : {}) },
-        },
-      });
-      const text = (json?.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
-      return { text, model: cfg.model, routedVia: `google/${cfg.model}`, usage: { input: json?.usageMetadata?.promptTokenCount, output: json?.usageMetadata?.candidatesTokenCount } };
+      return { text, model: json?.model, routedVia: `anthropic/${json?.model || cfg.model}`, usage: { input: json?.usage?.input_tokens, output: json?.usage?.output_tokens } };
     },
   },
 };
 
-// Speech-to-text providers (separate from text models).
-export const TRANSCRIBERS = {
-  groq: {
-    id: 'groq',
-    name: 'Groq Whisper',
-    billing: 'Groq has a free plan for Whisper with rate limits and a 25 MB file limit (Editflow sends 16 kHz mono audio, so about 13 minutes per file). Check console.groq.com/docs for current limits.',
-    dataUse: 'The audio track (not the video) is uploaded to Groq for transcription.',
-    secretLabel: 'Groq API key',
-    async transcribe(key, audio, { model = 'whisper-large-v3-turbo', prompt = '', type = 'audio/wav', filename = 'audio.wav' } = {}) {
-      const form = new FormData();
-      form.append('file', audio instanceof Blob ? audio : new Blob([audio], { type }), filename);
-      form.append('model', model);
-      form.append('response_format', 'verbose_json');
-      form.append('timestamp_granularities[]', 'segment');
-      if (prompt) form.append('prompt', prompt.slice(0, 400));
-      const { json } = await http('https://api.groq.com/openai/v1/audio/transcriptions', {
-        method: 'POST',
-        headers: { authorization: `Bearer ${key}` },
-        body: form,
-        timeout: 300_000,
-      });
-      return { language: json?.language, segments: (json?.segments || []).map((s) => ({ start: s.start, end: s.end, text: String(s.text).trim() })) };
-    },
-  },
-};
+export const SUBSCRIPTION_INFO = SUBSCRIPTION_NOTE;
 
 /** Pull the first JSON object out of a model reply (handles ``` fences and stray prose). */
 export function extractJson(text) {
