@@ -2,6 +2,8 @@
 
 Story-first video editing for solo creators and small agencies. Upload a talking-head, podcast or product clip and say who it's for. Editflow drafts an editable first cut with a hook, story structure, captions, B-roll ideas and music direction. You refine it in plain language or with simple controls, then export an MP4.
 
+**Live:** https://editflow-brown.vercel.app
+
 **Stack:** React + Vite (hosted on Vercel) · Supabase (Auth, Postgres with row-level security, Storage) · one Vercel serverless function for AI calls · ffmpeg.wasm for rendering in the browser.
 
 > To rename the product, change `client/src/lib/brand.js`.
@@ -28,6 +30,8 @@ Video never passes through the Vercel function, so its 4.5 MB request limit does
 ---
 
 ## Deploy (Vercel + Supabase)
+
+**Already done for the live site:** the Vercel project `editflow` deploys automatically on every push to `main` and has `EDITFLOW_SECRET` set. In Supabase Auth, the Site URL and redirect URL point at the Vercel domain, anonymous (guest) sign-ins are on, and email confirmation is off. The steps below are for setting it up again or somewhere else.
 
 The Supabase project `editflow` is already set up: tables, row-level security and the `media` storage bucket are applied from `supabase/migrations/0001_init.sql`. Its URL and publishable key are in `shared/config.js`. Publishable keys are safe to ship to browsers.
 
