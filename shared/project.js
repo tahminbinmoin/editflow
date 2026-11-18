@@ -18,6 +18,7 @@ export function newProjectData(settings = {}) {
       referenceUrl: settings.referenceUrl || '',
     },
     assets: [],
+    folders: [], // folders on the user's computer linked to this project: [{ id, name }]
     transcript: { source: null, language: null, segments: [] },
     plan: null,
     timeline: emptyTimeline(aspect),

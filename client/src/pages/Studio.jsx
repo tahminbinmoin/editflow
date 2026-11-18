@@ -56,7 +56,7 @@ export default function Studio() {
   const { id } = useParams();
   const nav = useNavigate();
   const { engine } = useAuth();
-  const { project, error, ops, act, busy, urls, consent, allowConsent, cancelConsent } = useProject(id);
+  const { project, error, ops, act, busy, urls, folders, consent, allowConsent, cancelConsent } = useProject(id);
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [selection, setSelection] = useState(null);
@@ -78,9 +78,10 @@ export default function Studio() {
     pendingFiles.delete(id);
     setLeftTab('media');
     for (const kind of ['footage', 'broll', 'music', 'reference']) {
-      const list = files.filter((f) => f.kind === kind).map((f) => f.file);
+      const list = files.filter((f) => f.file && f.kind === kind).map((f) => f.file);
       if (list.length) act.addFiles(list, kind);
     }
+    for (const f of files.filter((x) => x.local)) act.addLocalFiles(f.local.folderId, f.local.entries, f.local.listing);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id]);
 
@@ -152,7 +153,7 @@ export default function Studio() {
   const leftPanels = {
     story: <StoryPanel project={project} timeline={timeline} time={time} onSeek={seek} selection={selection} onSelect={selectAndEdit} />,
     transcript: <TranscriptPanel project={project} timeline={timeline} time={time} onSeek={seek} ops={ops} act={act} readOnly={showingPending} />,
-    media: <MediaPanel project={project} urls={urls} act={act} ops={ops} busy={busy} readOnly={showingPending} />,
+    media: <MediaPanel project={project} urls={urls} folders={folders} act={act} ops={ops} busy={busy} readOnly={showingPending} />,
   };
 
   return (

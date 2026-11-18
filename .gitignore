@@ -6,3 +6,4 @@ data/
 .DS_Store
 client/public/ffmpeg/
 client/public/fonts/
+client/public/.test-fixtures/

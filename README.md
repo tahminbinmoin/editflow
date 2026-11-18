@@ -18,6 +18,7 @@ Browser (Vercel static site)                       Supabase                     
 React app ── sign in ───────────────────────────▶  Auth (email, guest)
           ── projects / history (RLS per user) ─▶  Postgres
           ── upload footage (≤ 50 MB/file) ─────▶  Storage: media/<user>/<project>/…
+          ── or read it from a folder on the PC (no upload, any size); exports saved back there
           ── probe, waveform, pauses, thumbnails: in the browser
           ── export: ffmpeg.wasm renders the MP4 on the user's device
           ── "make a first cut" / "make it faster" ────────────────────────────▶  AI adapters (FreeLLMAPI, OpenAI,
@@ -26,6 +27,16 @@ React app ── sign in ──────────────────�
 ```
 
 Video never passes through the Vercel function, so its 4.5 MB request limit doesn't apply. Uploads go straight to Supabase Storage, and rendering happens in the browser.
+
+### Work from a folder on your computer
+
+For files over the 50 MB upload limit (or to avoid uploading at all), choose **Use a folder on this computer** when you start a project, or **Link folder** in the studio's Media tab. Pick the folder your videos download to (Downloads, Videos, a shoot folder), tick the files you want and choose footage, B-roll, music or reference for each.
+
+- The video stays on your computer. The browser reads it directly for preview, analysis and export; only a small thumbnail and waveform go to your account.
+- A caption file with the same name next to a video (`interview.mp4` + `interview.srt` or `.vtt`) is imported as its transcript.
+- Exports are saved into an **Editflow exports** folder inside the linked folder (exports under 50 MB are also kept in your account).
+- **Chrome and Edge on desktop** remember the folder: on a later visit, click **Allow access** once. Other browsers (Firefox, Safari) can read the folder for the current visit only, so choose it again after reloading, and exports download instead of saving into the folder.
+- The project only plays on a computer where that folder is linked. On another device, the clips show "folder not connected" until you link a folder with the same files.
 
 ---
 
@@ -91,7 +102,7 @@ Each user adds their own keys in **AI settings**. Keys are encrypted with `EDITF
 ## What works today
 
 - Accounts (email/password, guest demo through anonymous sign-in, upgrading a guest to a full account), private projects per user, a sample project
-- Uploads with progress straight to Supabase Storage; in-browser reading of duration and resolution, waveforms, pause detection, thumbnails, and reference-video pacing (frame sampling)
+- Uploads with progress straight to Supabase Storage, or working straight from a folder on the user's computer (any file size, exports saved back into the folder); in-browser reading of duration and resolution, waveforms, pause detection, thumbnails, and reference-video pacing (frame sampling)
 - Story planning (AI or rule-based) as a structured plan: hook options, beats, clip order, captions, B-roll tied to lines with reasons, music mood, sound-design notes, audio clean-up, a review checklist
 - Edits stored as JSON ops with undo/redo and history (`project_history` table); AI proposals previewed before they apply
 - Manual editing: trim, split, reorder, delete, volume, transitions, caption styles and text, 4 text templates, B-roll slots, music with ducking, loudness normalisation, noise reduction, text-based cutting
@@ -99,7 +110,7 @@ Each user adds their own keys in **AI settings**. Keys are encrypted with `EDITF
 
 ## Limits to know
 
-- **Supabase Free plan:** 50 MB per file, and projects pause after a period of inactivity. Upgrade before regular use.
+- **Supabase Free plan:** 50 MB per uploaded file (use a linked folder for bigger files), and projects pause after a period of inactivity. Upgrade before regular use.
 - **Browser rendering** is slower than a server: Draft takes roughly 1–3× the video length on a laptop, and it needs a desktop browser with enough memory.
 - Sample project: placeholder footage, a synthetic speech tone and a written transcript, all labelled.
 - Reframing is a center crop. Reference title style, transitions and music genre aren't measured.

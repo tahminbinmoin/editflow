@@ -2,6 +2,7 @@
 // thumbnails, reference pacing, and uploads to Supabase Storage. Nothing here needs a server.
 import { supabase, SUPABASE_URL, SUPABASE_KEY, accessToken } from './supabase.js';
 import { MEDIA_BUCKET, MAX_UPLOAD_MB } from '@shared/config.js';
+import { localUrl, getLocalFile } from './localFolder.js';
 
 const loadEl = (src, tag) =>
   new Promise((resolve, reject) => {
@@ -250,11 +251,35 @@ export async function signedUrls(paths) {
   return Object.fromEntries(paths.filter(Boolean).map((p) => [p, urlCache.get(p)?.url]));
 }
 
-/** Resolved URLs for an asset: sample assets are static files, user assets are signed Storage URLs. */
+/**
+ * Resolved URLs per asset: sample assets are static files, uploaded assets are signed Storage
+ * URLs, and folder assets are object URLs of the file on this computer (null if the folder
+ * isn't connected in this browser — then `missing` is true).
+ */
 export async function assetUrls(assets) {
   const paths = assets.flatMap((a) => [a.path, a.thumbPath, a.peaksPath]).filter(Boolean);
-  const signed = paths.length ? await signedUrls(paths) : {};
-  return Object.fromEntries(
-    assets.map((a) => [a.id, { file: a.url || signed[a.path], thumb: a.thumbUrl || signed[a.thumbPath], peaks: a.peaksUrl || signed[a.peaksPath] }]),
-  );
+  const signed = paths.length ? await signedUrls(paths).catch(() => ({})) : {};
+  const out = {};
+  for (const a of assets) {
+    const local = a.source === 'local' ? await localUrl(a) : null;
+    out[a.id] = {
+      file: a.source === 'local' ? local : a.url || signed[a.path],
+      thumb: a.thumbUrl || signed[a.thumbPath],
+      peaks: a.peaksUrl || signed[a.peaksPath],
+      missing: a.source === 'local' && !local,
+    };
+  }
+  return out;
+}
+
+/** The media bytes for rendering: the local File itself (no copy) or a downloaded Blob. */
+export async function assetBlob(asset, urls) {
+  if (asset.source === 'local') {
+    const f = await getLocalFile(asset.folderId, asset.relPath);
+    if (!f) throw new Error(`${asset.name} is in a folder that isn't connected in this browser. Reconnect it in the Media tab.`);
+    return f;
+  }
+  const url = urls[asset.id]?.file;
+  if (!url) throw new Error(`Could not open ${asset.name}.`);
+  return (await fetch(url)).blob();
 }

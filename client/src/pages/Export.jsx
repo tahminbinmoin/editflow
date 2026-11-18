@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, Download, Film, CheckCircle2, AlertTriangle, Cpu } from 'lucide-react';
 import AppHeader from '../components/AppHeader.jsx';
@@ -10,6 +10,7 @@ import { Progress, bytes, timeAgo, useToast } from '../components/ui.jsx';
 import { layout, formatTime, ASPECTS, uid } from '@shared/timeline.js';
 import { QUALITIES, dimensions } from '@shared/render-graph.js';
 import { MAX_UPLOAD_MB } from '@shared/config.js';
+import { saveToFolder, canSaveToFolder, folderStatus } from '../lib/localFolder.js';
 
 export default function ExportPage() {
   const { id } = useParams();
@@ -19,6 +20,14 @@ export default function ExportPage() {
   const [quality, setQuality] = useState('draft');
   const [job, setJob] = useState(null); // { step, progress, eta }
   const [results, setResults] = useState({}); // exportId → blob URL (this session)
+  const [saveFolder, setSaveFolder] = useState(null); // folder that can receive exports
+  const [toFolder, setToFolder] = useState(true);
+  useEffect(() => {
+    (async () => {
+      for (const f of project?.folders || []) if ((await canSaveToFolder(f.id)) && (await folderStatus(f.id)) !== 'unavailable') return setSaveFolder(f);
+      setSaveFolder(null);
+    })();
+  }, [project?.folders?.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!project) return <><AppHeader /><div className="page row muted"><span className="spinner" /> Loading…</div></>;
   const tl = project.timeline;
@@ -27,6 +36,7 @@ export default function ExportPage() {
   const brollMissing = tl.broll.filter((b) => !b.assetId).length;
   const size = dimensions(curAspect, quality);
   const notReady = project.assets.some((a) => a.status !== 'ready' && a.status !== 'error');
+  const missingLocal = layout(tl).clips.some((c) => urls[c.assetId]?.missing) || tl.broll.some((b) => b.assetId && urls[b.assetId]?.missing) || (tl.music.assetId && urls[tl.music.assetId]?.missing);
 
   const render = async () => {
     const exportId = uid('exp');
@@ -38,16 +48,27 @@ export default function ExportPage() {
       const safe = project.name.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'editflow';
       const file = `${safe}-${curAspect.replace(':', 'x')}-${quality}.mp4`;
       const rec = { id: exportId, status: 'done', aspect: curAspect, quality, width: out.W, height: out.H, duration: out.duration, file, size: out.blob.size, renderSeconds: out.seconds, createdAt: new Date().toISOString() };
+      if (saveFolder && toFolder) {
+        setJob({ step: `Saving into ${saveFolder.name}/Editflow exports…`, progress: 1 });
+        try {
+          rec.savedTo = `${saveFolder.name}/${await saveToFolder(saveFolder.id, 'Editflow exports', file, out.blob)}`;
+        } catch (e) {
+          toast(`Could not save into the folder: ${e.message}`, 'err');
+        }
+      }
       if (out.blob.size <= MAX_UPLOAD_MB * 1048576) {
         setJob({ step: 'Saving a copy to your account…', progress: 1 });
         const user = await currentUser();
         rec.path = await uploadToStorage(`${user.id}/${project.id}/exports/${exportId}.mp4`, out.blob, null, 'video/mp4').catch(() => null);
       }
       await act.recordExport(rec);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file;
-      a.click();
+      if (rec.savedTo) toast(`Saved to ${rec.savedTo}`);
+      else {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file;
+        a.click();
+      }
     } catch (e) {
       toast(e.message, 'err');
     } finally {
@@ -124,6 +145,11 @@ export default function ExportPage() {
               </div>
             )}
           </div>
+          {saveFolder && (
+            <label className="check small">
+              <input type="checkbox" checked={toFolder} onChange={(e) => setToFolder(e.target.checked)} /> Save into “{saveFolder.name}/Editflow exports” on this computer (otherwise it downloads)
+            </label>
+          )}
           {job ? (
             <div className="stack-sm">
               <div className="small">
@@ -134,9 +160,12 @@ export default function ExportPage() {
               <Progress value={job.progress} />
             </div>
           ) : (
-            <button className="btn primary lg" disabled={!clips.length || notReady} onClick={render}>
-              <Film size={18} /> {notReady ? 'Waiting for uploads to finish…' : 'Render video'}
-            </button>
+            <>
+              {missingLocal && <div className="notice warm">Some clips are in a folder on your computer that isn’t connected in this browser. Open the studio’s Media tab and reconnect the folder first.</div>}
+              <button className="btn primary lg" disabled={!clips.length || notReady || missingLocal} onClick={render}>
+                <Film size={18} /> {notReady ? 'Waiting for files to finish processing…' : 'Render video'}
+              </button>
+            </>
           )}
         </section>
 
@@ -150,7 +179,8 @@ export default function ExportPage() {
                 <div className="tiny muted mono">
                   {e.width}×{e.height} · {formatTime(e.duration)} · {timeAgo(e.createdAt)} {e.size ? `· ${bytes(e.size)}` : ''} {e.renderSeconds ? `· rendered in ${e.renderSeconds}s` : ''}
                 </div>
-                {!e.path && !results[e.id] && <div className="tiny muted">Not saved to your account (over {MAX_UPLOAD_MB} MB). Render again to download.</div>}
+                {e.savedTo && <div className="tiny muted">Saved on this computer: {e.savedTo}</div>}
+                {!e.path && !results[e.id] && !e.savedTo && <div className="tiny muted">Not saved to your account (over {MAX_UPLOAD_MB} MB). Render again to download.</div>}
               </div>
               {(e.path || results[e.id]) && (
                 <button

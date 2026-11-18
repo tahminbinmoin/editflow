@@ -146,6 +146,7 @@ export default function Landing() {
                 <li>Real trimming, reordering, captions, text templates, B-roll cutaways and fades, rendered to MP4 in your browser (ffmpeg.wasm) in 9:16, 1:1, 4:5 or 16:9</li>
                 <li>Loudness normalisation (−14 LUFS), noise reduction and music ducking under speech</li>
                 <li>Pause detection and measured pacing of your reference video (cuts per minute, shot length)</li>
+                <li>Work straight from a folder on your computer (e.g. Downloads): any file size, nothing uploaded, exports saved back into the folder (Chrome and Edge remember it)</li>
                 <li>Undo, redo and a full edit history; AI changes are previewed before they apply</li>
                 <li>Story planning with your own AI provider, or a transparent rule-based draft with no AI at all</li>
               </ul>

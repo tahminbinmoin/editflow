@@ -1,5 +1,8 @@
-import { useRef } from 'react';
-import { Upload, Trash2, Plus, Music, Film, Gauge, AlertTriangle } from 'lucide-react';
+import { useCallback, useRef, useState } from 'react';
+import { Upload, Trash2, Plus, Music, Film, Gauge, AlertTriangle, HardDrive, FolderPlus, Unplug } from 'lucide-react';
+import FolderBrowser from './FolderBrowser.jsx';
+import { supportsFolderAccess, pickFolder, registerPickedFiles, listFolder } from '../lib/localFolder.js';
+import { useToast } from './ui.jsx';
 import { Progress, bytes } from './ui.jsx';
 import { formatTime } from '@shared/timeline.js';
 import { MAX_UPLOAD_MB } from '@shared/config.js';
@@ -39,6 +42,11 @@ function AssetRow({ project, a, urls, act, ops, readOnly }) {
           <div className="tiny muted mono">
             {formatTime(a.duration || 0)} {a.width ? `· ${a.width}×${a.height}` : ''} {a.size ? `· ${bytes(a.size)}` : ''}
             {a.sample && <span className="pill warm" style={{ marginLeft: 6 }}>sample</span>}
+            {a.source === 'local' && (
+              <span className={`pill ${urls[a.id]?.missing ? 'err' : 'info'}`} style={{ marginLeft: 6 }} title={a.relPath}>
+                <HardDrive size={10} /> {urls[a.id]?.missing ? 'folder not connected' : 'on this computer'}
+              </span>
+            )}
           </div>
         )}
         {!readOnly && (a.status === 'ready' || a.status === 'error') && (
@@ -70,14 +78,121 @@ function AssetRow({ project, a, urls, act, ops, readOnly }) {
   );
 }
 
-export default function MediaPanel({ project, urls, act, ops, busy, readOnly }) {
+function FoldersSection({ project, folders, act, readOnly }) {
+  const toast = useToast();
+  const [browsing, setBrowsing] = useState(null);
+  const fallback = useRef();
+  const [fallbackFor, setFallbackFor] = useState(null);
+  const linked = project.folders || [];
+  const listFn = useCallback(() => (browsing ? listFolder(browsing.id) : Promise.resolve([])), [browsing]);
+  const link = async () => {
+    try {
+      if (supportsFolderAccess) await act.linkFolder();
+      else (setFallbackFor('new'), fallback.current.click());
+    } catch (e) {
+      if (e.name !== 'AbortError') toast(e.message, 'err');
+    }
+  };
+  const relink = async (f) => {
+    try {
+      if (supportsFolderAccess) {
+        await pickFolder(f.id);
+        await act.reconnectFolder(f.id, null);
+      } else (setFallbackFor(f.id), fallback.current.click());
+    } catch (e) {
+      if (e.name !== 'AbortError') toast(e.message, 'err');
+    }
+  };
+  return (
+    <div className="stack-sm">
+      <div className="spread">
+        <div className="section-title" style={{ margin: 0 }}>
+          Folders on this computer
+        </div>
+        {!readOnly && (
+          <button className="btn xs" onClick={link}>
+            <FolderPlus size={12} /> Link folder
+          </button>
+        )}
+      </div>
+      {!linked.length && <p className="tiny muted">Work with large videos without uploading: link a folder such as Downloads or Videos. Files stay on your computer.</p>}
+      {linked.map((f) => {
+        const st = folders[f.id]?.status;
+        const used = project.assets.filter((a) => a.folderId === f.id).map((a) => a.relPath);
+        return (
+          <div key={f.id} className="card tight stack-sm">
+            <div className="spread">
+              <span className="small" style={{ fontWeight: 600 }}>
+                <HardDrive size={13} style={{ verticalAlign: -2 }} /> {f.name}
+              </span>
+              <span className={`pill ${st === 'ready' ? 'ok' : st === 'needs-permission' ? 'warm' : 'err'}`}>{st === 'ready' ? 'Connected' : st === 'needs-permission' ? 'Needs permission' : st ? 'Not connected here' : '…'}</span>
+            </div>
+            {st === 'ready' && !readOnly && (
+              <div className="row">
+                <button className="btn xs primary" onClick={() => setBrowsing(f)}>
+                  <Plus size={12} /> Add files from folder
+                </button>
+                <button className="btn xs ghost" title="Unlink folder" aria-label={`Unlink ${f.name}`} onClick={() => window.confirm(`Unlink “${f.name}”? Files already added stay in the project.`) && act.unlinkFolder(f.id)}>
+                  <Unplug size={12} />
+                </button>
+              </div>
+            )}
+            {st === 'needs-permission' && (
+              <button className="btn xs primary" style={{ alignSelf: 'flex-start' }} onClick={() => act.reconnectFolder(f.id)}>
+                Allow access to {f.name}
+              </button>
+            )}
+            {st === 'unavailable' && (
+              <>
+                <p className="tiny muted">This folder was linked in another browser or on another computer. Choose the same folder here to reconnect it.</p>
+                <button className="btn xs" style={{ alignSelf: 'flex-start' }} onClick={() => relink(f)}>
+                  Choose “{f.name}” again
+                </button>
+              </>
+            )}
+            {used.length > 0 && <span className="tiny muted">{used.length} file{used.length === 1 ? '' : 's'} in this project</span>}
+          </div>
+        );
+      })}
+      <input
+        ref={fallback}
+        type="file"
+        hidden
+        webkitdirectory=""
+        directory=""
+        multiple
+        onChange={async (e) => {
+          const files = e.target.files;
+          if (fallbackFor === 'new') {
+            const f = registerPickedFiles(files);
+            if (f) await act.linkFolder(f);
+          } else if (fallbackFor) await act.reconnectFolder(fallbackFor, files);
+          e.target.value = '';
+        }}
+      />
+      {browsing && (
+        <FolderBrowser
+          folder={browsing}
+          list={listFn}
+          already={project.assets.filter((a) => a.folderId === browsing.id).map((a) => a.relPath)}
+          onAdd={(entries, listing) => act.addLocalFiles(browsing.id, entries, listing)}
+          onClose={() => setBrowsing(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+export default function MediaPanel({ project, urls, folders = {}, act, ops, busy, readOnly }) {
   const refs = useRef({});
   const refAsset = project.assets.find((a) => a.kind === 'reference');
   const ins = project.referenceInsights;
 
   return (
     <div className="stack">
-      <p className="tiny muted">Files are processed in your browser, then stored privately in your account. Up to {MAX_UPLOAD_MB} MB per file.</p>
+      <FoldersSection project={project} folders={folders} act={act} readOnly={readOnly} />
+      <div className="divider" style={{ margin: '4px 0' }} />
+      <p className="tiny muted">Uploads are processed in your browser, then stored privately in your account (up to {MAX_UPLOAD_MB} MB per file). For bigger files, link a folder above.</p>
       {KINDS.map(([kind, label, accept]) => {
         const list = project.assets.filter((a) => a.kind === kind);
         return (

@@ -1,12 +1,16 @@
-import { useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { UploadCloud, X, Link2 } from 'lucide-react';
 import AppHeader from '../components/AppHeader.jsx';
 import { createProject } from '../lib/store.js';
 import { pendingFiles } from '../lib/pendingFiles.js';
+import { supportsFolderAccess, pickFolder, registerPickedFiles, listFolder } from '../lib/localFolder.js';
+import { FolderFileList } from '../components/FolderBrowser.jsx';
+import { HardDrive, CloudUpload } from 'lucide-react';
 import { Progress, bytes, useToast } from '../components/ui.jsx';
 import { ASPECTS } from '@shared/timeline.js';
 import { MAX_UPLOAD_MB } from '@shared/config.js';
+import { newProjectData } from '@shared/project.js';
 import { BRAND } from '../lib/brand.js';
 
 const PLATFORMS = {
@@ -52,6 +56,19 @@ export default function NewProject() {
   const [s, setS] = useState({ name: '', aspect: '9:16', targetLength: 45, audience: '', goal: '', tone: '', notes: '', referenceNotes: '', referenceUrl: '' });
   const [files, setFiles] = useState([]); // {file, kind, progress, status}
   const [busy, setBusy] = useState(false);
+  const [source, setSource] = useState('upload'); // 'upload' | 'folder'
+  const [folder, setFolder] = useState(null); // { id, name }
+  const [picked, setPicked] = useState({ entries: [], listing: [] });
+  const fallbackRef = useRef();
+  const listFn = useCallback(() => (folder ? listFolder(folder.id) : Promise.resolve([])), [folder]);
+  const choose = async () => {
+    try {
+      if (supportsFolderAccess) setFolder(await pickFolder());
+      else fallbackRef.current.click();
+    } catch (e) {
+      if (e.name !== 'AbortError') toast(e.message, 'err');
+    }
+  };
   const set = (k) => (e) => setS({ ...s, [k]: e.target.value });
 
   const add = (list, kind) => {
@@ -62,15 +79,22 @@ export default function NewProject() {
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!files.some((f) => f.kind === 'footage')) {
+    const useFolder = source === 'folder' && folder;
+    if (!files.some((f) => f.kind === 'footage') && !(useFolder && picked.entries.some((e) => e.kind === 'footage'))) {
       if (!window.confirm('No footage added yet. Create the project anyway? You can upload later in the studio.')) return;
     }
     const tooBig = files.find((f) => f.file.size > MAX_UPLOAD_MB * 1024 * 1024);
-    if (tooBig) return toast(`${tooBig.file.name} is over ${MAX_UPLOAD_MB} MB. Use a shorter or lower-resolution export of it.`, 'err');
+    if (tooBig) return toast(`${tooBig.file.name} is over ${MAX_UPLOAD_MB} MB. Choose “Use a folder on this computer” to work with it without uploading.`, 'err');
     setBusy(true);
     try {
-      const project = await createProject(s.name || files.find((f) => f.kind === 'footage')?.file.name.replace(/\.[^.]+$/, '') || 'Untitled video', { ...s, platform: PLATFORMS[s.aspect] });
-      if (files.length) pendingFiles.set(project.id, files.map(({ file, kind }) => ({ file, kind })));
+      const firstLocal = useFolder && picked.entries.find((e) => e.kind === 'footage')?.relPath.split('/').pop();
+      const name = s.name || files.find((f) => f.kind === 'footage')?.file.name.replace(/\.[^.]+$/, '') || firstLocal?.replace(/\.[^.]+$/, '') || 'Untitled video';
+      const data = newProjectData({ ...s, platform: PLATFORMS[s.aspect] });
+      if (useFolder) data.folders = [{ id: folder.id, name: folder.name }];
+      const project = await createProject(name, null, { data });
+      const pending = files.map(({ file, kind }) => ({ file, kind }));
+      if (useFolder && picked.entries.length) pending.push({ local: { folderId: folder.id, entries: picked.entries, listing: picked.listing } });
+      if (pending.length) pendingFiles.set(project.id, pending);
       nav(`/app/p/${project.id}`);
     } catch (err) {
       toast(err.message, 'err');
@@ -87,7 +111,7 @@ export default function NewProject() {
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.file.name}</span>
               <span className="muted tiny">{bytes(f.file.size)}</span>
             </div>
-            {f.file.size > MAX_UPLOAD_MB * 1048576 && <span className="tiny" style={{ color: 'var(--err)' }}>Over the {MAX_UPLOAD_MB} MB limit</span>}
+            {f.file.size > MAX_UPLOAD_MB * 1048576 && <span className="tiny" style={{ color: 'var(--err)' }}>Over the {MAX_UPLOAD_MB} MB upload limit. Use the folder option instead.</span>}
           </div>
           {!busy && (
             <button type="button" className="btn icon ghost" onClick={() => setFiles(files.filter((_, j) => j !== i))} aria-label="Remove file">
@@ -111,7 +135,60 @@ export default function NewProject() {
 
         <section className="card stack">
           <div className="section-title">1 · Footage</div>
-          <Dropzone label="Drop your talking-head, podcast or product clips" sub={`MP4, WebM or audio files · up to ${MAX_UPLOAD_MB} MB each`} onFiles={(l) => add(l, 'footage')} />
+          <div className="grid-2">
+            <button type="button" className={`choice ${source === 'upload' ? 'on' : ''}`} onClick={() => setSource('upload')} aria-pressed={source === 'upload'}>
+              <CloudUpload size={20} />
+              <b style={{ fontSize: 14 }}>Upload files</b>
+              <span className="tiny muted">Up to {MAX_UPLOAD_MB} MB each. Works on any device, including your phone.</span>
+            </button>
+            <button type="button" className={`choice ${source === 'folder' ? 'on' : ''}`} onClick={() => setSource('folder')} aria-pressed={source === 'folder'}>
+              <HardDrive size={20} />
+              <b style={{ fontSize: 14 }}>Use a folder on this computer</b>
+              <span className="tiny muted">Any file size. Videos stay on your computer, and exports can be saved back to the folder.</span>
+            </button>
+          </div>
+          {source === 'folder' ? (
+            <div className="stack-sm">
+              {!folder ? (
+                <>
+                  <button type="button" className="btn primary" style={{ alignSelf: 'flex-start' }} onClick={choose}>
+                    <HardDrive size={16} /> Choose folder (e.g. Downloads or Videos)
+                  </button>
+                  <p className="tiny muted">
+                    {supportsFolderAccess
+                      ? 'Your browser will ask you to allow access to the folder. Editflow remembers it, so next time you just click "Allow".'
+                      : 'Your browser can read the folder until you close this tab; you will be asked to choose it again next time. Chrome or Edge on a computer can remember it.'}
+                  </p>
+                  <input
+                    ref={fallbackRef}
+                    type="file"
+                    hidden
+                    webkitdirectory=""
+                    directory=""
+                    multiple
+                    onChange={(e) => {
+                      const f = registerPickedFiles(e.target.files);
+                      if (f) setFolder(f);
+                    }}
+                  />
+                </>
+              ) : (
+                <>
+                  <div className="spread">
+                    <span className="small">
+                      <HardDrive size={14} style={{ verticalAlign: -2 }} /> <b>{folder.name}</b> · tick the files to use
+                    </span>
+                    <button type="button" className="btn xs ghost" onClick={() => (setFolder(null), setPicked({ entries: [], listing: [] }))}>
+                      Change folder
+                    </button>
+                  </div>
+                  <FolderFileList list={listFn} onChange={(entries, listing) => setPicked({ entries, listing })} />
+                </>
+              )}
+            </div>
+          ) : (
+            <Dropzone label="Drop your talking-head, podcast or product clips" sub={`MP4, WebM or audio files · up to ${MAX_UPLOAD_MB} MB each`} onFiles={(l) => add(l, 'footage')} />
+          )}
           <div className="stack-sm">{fileList('footage')}</div>
           <details className="disclosure">
             <summary>Add B-roll or music you have rights to (optional)</summary>

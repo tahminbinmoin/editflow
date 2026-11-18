@@ -147,3 +147,20 @@ test('hosted app refuses private router URLs', () => {
     else process.env.VERCEL = prev;
   }
 });
+
+test('local folder: file kinds and caption sidecars', async () => {
+  const { kindOf, findSidecar } = await import('../client/src/lib/localFolder.js');
+  assert.equal(kindOf('Shoot.MP4'), 'video');
+  assert.equal(kindOf('take.mov'), 'video');
+  assert.equal(kindOf('bed.mp3'), 'audio');
+  assert.equal(kindOf('talk.srt'), 'subtitle');
+  assert.equal(kindOf('notes.txt'), null);
+  const listing = [
+    { relPath: 'Shoots/interview.mp4', kind: 'video' },
+    { relPath: 'Shoots/Interview.SRT', kind: 'subtitle' },
+    { relPath: 'other.vtt', kind: 'subtitle' },
+  ];
+  assert.equal(findSidecar(listing, 'Shoots/interview.mp4')?.relPath, 'Shoots/Interview.SRT');
+  assert.equal(findSidecar(listing, 'interview.mp4'), null);
+  assert.equal(findSidecar([], 'a.mp4'), null);
+});

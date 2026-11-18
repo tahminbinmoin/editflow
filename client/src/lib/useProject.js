@@ -6,6 +6,7 @@ import { currentUser } from './supabase.js';
 import * as store from './store.js';
 import { assetUrls, probeFile, decodeAudio, peaksFrom, silencesFrom, thumbnailFrom, analyzeReference, speechWav, uploadToStorage } from './media.js';
 import { transcribeLocally } from './localWhisper.js';
+import * as folder from './localFolder.js';
 import { useToast } from '../components/ui.jsx';
 import { useAuth } from '../App.jsx';
 import { applyOps, describeOp, diffSummary, uid, normalizeTimeline } from '@shared/timeline.js';
@@ -27,6 +28,7 @@ export function useProject(id) {
   const [busy, setBusy] = useState(null);
   const [consent, setConsent] = useState(null);
   const [urls, setUrls] = useState({});
+  const [folders, setFolders] = useState({}); // folderId → { name, status }
   const ref = useRef(null);
 
   const setProject = useCallback((p) => {
@@ -63,16 +65,31 @@ export function useProject(id) {
     };
   }, [id, setProject]);
 
-  // Signed URLs for media (refreshed when the asset list changes).
+  // Linked folders on this computer: are they available in this browser right now?
+  const folderKey = project ? (project.folders || []).map((f) => f.id).join('|') : '';
+  const refreshFolders = useCallback(async () => {
+    const list = ref.current?.folders || [];
+    const next = {};
+    for (const f of list) next[f.id] = { name: f.name, status: await folder.folderStatus(f.id) };
+    setFolders(next);
+    return next;
+  }, []);
+  useEffect(() => {
+    if (project) refreshFolders();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [folderKey]);
+
+  // Media URLs (signed Storage URLs, or local file URLs), refreshed when assets or folders change.
   const assetKey = project ? project.assets.map((a) => `${a.id}:${a.status}`).join('|') : '';
+  const folderStates = Object.values(folders).map((f) => f.status).join('|');
   useEffect(() => {
     if (!project) return;
-    const ready = project.assets.filter((a) => a.url || a.path);
+    const ready = project.assets.filter((a) => a.url || a.path || a.source === 'local');
     assetUrls(ready)
       .then(setUrls)
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assetKey]);
+  }, [assetKey, folderStates]);
 
   /** Wrap an action: busy label, error toast, and consent retry. */
   const run = useCallback(
@@ -257,16 +274,18 @@ export function useProject(id) {
         const user = await currentUser();
         for (const file of files) act.addFile(file, kind, user).catch(() => {});
       },
-      addFile: async (file, kind, user) => {
+      addFile: async (file, kind, user, local) => {
         const aid = uid('ast');
         const base = `${user.id}/${id}/${aid}`;
         const patch = (fields) => mutate((p) => Object.assign(p.assets.find((a) => a.id === aid) || {}, fields));
         activeUploads.add(aid);
-        await mutate((p) => p.assets.push({ id: aid, kind, name: file.name.slice(0, 160), mime: file.type, size: file.size, status: 'processing', step: 'Reading file', progress: 0.02, createdAt: new Date().toISOString() }));
+        const localFields = local ? { source: 'local', folderId: local.folderId, relPath: local.relPath, lastModified: file.lastModified } : {};
+        await mutate((p) => p.assets.push({ id: aid, kind, name: file.name.slice(0, 160), mime: file.type, size: file.size, ...localFields, status: 'processing', step: 'Reading file', progress: 0.02, createdAt: new Date().toISOString() }));
         try {
           const info = await probeFile(file);
           await patch({ ...info, step: 'Reading audio', progress: 0.08 });
-          const buf = info.duration < 1800 ? await decodeAudio(file) : null;
+          // Decoding audio loads the whole file into memory; skip it for very large files.
+          const buf = info.duration < 1800 && file.size < 1.5e9 ? await decodeAudio(file) : null;
           const fields = { hasAudio: !!buf };
           let peaks = null;
           if (buf) {
@@ -279,26 +298,67 @@ export function useProject(id) {
             await patch({ ...fields, step: 'Measuring cuts and pacing', progress: 0.12 });
             fields.analysis = await analyzeReference(file, info, buf);
           }
-          await patch({ ...fields, step: 'Uploading', progress: 0.15 });
-          let last = 0;
-          const path = await uploadToStorage(`${base}/original${ext(file.name)}`, file, (pr) => {
-            if (Date.now() - last > 600) {
-              last = Date.now();
-              setProject({ ...ref.current, assets: ref.current.assets.map((a) => (a.id === aid ? { ...a, progress: 0.15 + pr * 0.8 } : a)) });
-            }
-          });
-          const extra = { path };
+          const extra = {};
+          if (!local) {
+            await patch({ ...fields, step: 'Uploading', progress: 0.15 });
+            let last = 0;
+            extra.path = await uploadToStorage(`${base}/original${ext(file.name)}`, file, (pr) => {
+              if (Date.now() - last > 600) {
+                last = Date.now();
+                setProject({ ...ref.current, assets: ref.current.assets.map((a) => (a.id === aid ? { ...a, progress: 0.15 + pr * 0.8 } : a)) });
+              }
+            });
+          } else {
+            // The video stays on this computer; only a small thumbnail and waveform are stored.
+            await patch({ ...fields, step: 'Saving preview', progress: 0.9 });
+          }
           if (thumb) extra.thumbPath = await uploadToStorage(`${base}/thumb.jpg`, thumb, null, 'image/jpeg');
           if (peaks) extra.peaksPath = await uploadToStorage(`${base}/peaks.json`, new Blob([JSON.stringify(peaks)], { type: 'application/json' }), null, 'application/json');
           await mutate((p) => {
             Object.assign(p.assets.find((a) => a.id === aid), { ...extra, thumb: !!thumb, hasPeaks: !!peaks, status: 'ready', step: null, progress: 1, error: null });
             if (kind === 'music' && !p.timeline.music.assetId) p.timeline.music.assetId = aid;
           });
+          return aid;
         } catch (e) {
           await patch({ status: 'error', step: null, error: e.message.slice(0, 300) });
           toast(`${file.name}: ${e.message}`, 'err');
+          return null;
         } finally {
           activeUploads.delete(aid);
+        }
+      },
+
+      // ----- folders on this computer -----
+      linkFolder: async (picked) => {
+        const f = picked || (await folder.pickFolder());
+        if (!(ref.current.folders || []).some((x) => x.id === f.id)) await mutate((p) => (p.folders = [...(p.folders || []), { id: f.id, name: f.name }]));
+        await refreshFolders();
+        return f;
+      },
+      reconnectFolder: async (folderId, fileList) => {
+        if (fileList) folder.registerPickedFiles(fileList, folderId);
+        else if (!(await folder.reconnectFolder(folderId))) return toast('The browser did not allow access to the folder.', 'err');
+        folder.forgetLocalUrls(folderId);
+        await refreshFolders();
+      },
+      unlinkFolder: (folderId) => mutate((p) => (p.folders = (p.folders || []).filter((f) => f.id !== folderId))),
+      listFolder: (folderId) => folder.listFolder(folderId),
+      /** entries: [{ relPath, kind: 'footage'|'broll'|'music'|'reference' }] from listFolder */
+      addLocalFiles: async (folderId, entries, listing = []) => {
+        const user = await currentUser();
+        for (const e of entries) {
+          const file = await folder.getLocalFile(folderId, e.relPath);
+          if (!file) {
+            toast(`Could not open ${e.relPath}`, 'err');
+            continue;
+          }
+          const aid = await act.addFile(file, e.kind, user, { folderId, relPath: e.relPath });
+          // A caption file next to the video (same name, .srt or .vtt) becomes its transcript.
+          const side = folder.findSidecar(listing, e.relPath);
+          if (aid && side && (e.kind === 'footage' || e.kind === 'broll')) {
+            const sub = await folder.getLocalFile(folderId, side.relPath);
+            if (sub) await act.importTranscript(aid, await sub.text());
+          }
         }
       },
       removeAsset: (asset) =>
@@ -386,5 +446,5 @@ export function useProject(id) {
     c.retry();
   }, [consent, act]);
 
-  return { project, error, busy, urls, ops, act, consent, allowConsent, cancelConsent: () => setConsent(null) };
+  return { project, error, busy, urls, folders, ops, act, consent, allowConsent, cancelConsent: () => setConsent(null) };
 }

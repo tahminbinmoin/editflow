@@ -20,7 +20,9 @@ client/                    React app (Vite root)
   src/lib/store.js         projects + history in Postgres (RLS), storage cleanup
   src/lib/useProject.js    studio state + every action (edits, AI, uploads, transcripts, exports)
   src/lib/media.js         in-browser media: probe, waveform, pauses, thumbnails, reference pacing, uploads, signed URLs
-  src/lib/render.js        ffmpeg.wasm export (runs shared/render-graph.js plans)
+  src/lib/render.js        ffmpeg.wasm export (runs shared/render-graph.js plans; inputs mounted with WORKERFS)
+  src/lib/localFolder.js   linked folders on the user's PC: File System Access API (handles in IndexedDB
+                           'editflow-local'), <input webkitdirectory> fallback, listing, reading, saving exports
   src/lib/sample.js        builds the sample project from client/public/sample
   src/components/          Player, Timeline, panels (Story, Transcript, Media, AI, Edit)
   src/pages/               Landing, Auth, Dashboard, NewProject, Studio, Export, Settings
@@ -50,7 +52,9 @@ test/                      unit, API and render tests + mock-supabase.js, mock-f
 | `ai_log` | AI request log (provider, routed model, tokens, errors) | owner only |
 | storage `media` | `<user id>/<project id>/<asset id>/original.*, thumb.jpg, peaks.json`, `…/exports/*.mp4` | owner folder only |
 
-`projects.data` holds `settings`, `assets[]`, `transcript.segments[]` (IDs `s1`, `s2`…), `plan`, `timeline`, `history {entries, index}`, `pending` (AI proposal), `consent`, `chat[]`, `exports[]`, `mode`, `referenceInsights`.
+Assets read from a linked folder have `source: 'local', folderId, relPath, lastModified` and no `original.*` in storage (only `thumb.jpg` and `peaks.json`). `projects.data.folders[]` lists `{id, name}`; the handle itself lives only in that browser's IndexedDB, so another device sees the folder as "not connected here". `media.assetUrls` / `assetBlob` resolve local assets to object URLs / `File`s; anything that reads media should go through them.
+
+`projects.data` holds `settings`, `assets[]`, `folders[]`, `transcript.segments[]` (IDs `s1`, `s2`…), `plan`, `timeline`, `history {entries, index}`, `pending` (AI proposal), `consent`, `chat[]`, `exports[]`, `mode`, `referenceInsights`.
 
 ### Timeline shape (`shared/timeline.js`)
 
