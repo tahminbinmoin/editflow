@@ -318,3 +318,20 @@ test('stock: the right rendition is downloaded', async () => {
   assert.deepEqual(pickFile([{ width: 540, height: 960 }, { width: 2160, height: 3840 }]), { width: 2160, height: 3840 });
   assert.deepEqual(pickFile([{ width: 360, height: 640 }, { width: 540, height: 960 }]), { width: 540, height: 960 });
 });
+
+test('motion graphics: every editable field can be changed after adding (layout, body, values, labels, variant, photo, sound)', () => {
+  const { timeline: tl } = applyOps(emptyTimeline(), [{ type: 'addGraphic', graphic: { id: 'g1', type: 'headline', text: 'x', start: 0 } }]);
+  assert.equal(tl.graphics[0].layout, 'panel');
+  let t2 = tl;
+  for (const layout of ['full', 'overlay', 'panel']) {
+    t2 = applyOps(t2, [{ type: 'updateGraphic', graphicId: 'g1', patch: { layout } }]).timeline;
+    assert.equal(t2.graphics[0].layout, layout);
+  }
+  const bad = applyOps(t2, [{ type: 'updateGraphic', graphicId: 'g1', patch: { layout: 'sideways' } }]).timeline;
+  assert.equal(bad.graphics[0].layout, 'panel', 'unknown layouts fall back to the type default');
+  const c = applyOps(tl, [
+    { type: 'updateGraphic', graphicId: 'g1', patch: { type: 'chart', values: [10, 5], labels: ['a', 'b', '$'], layout: 'full' } },
+    { type: 'updateGraphic', graphicId: 'g1', patch: { body: 'b', variant: 'speech', assetId: 'img', sfx: 'none' } },
+  ]).timeline.graphics[0];
+  assert.deepEqual([c.type, c.layout, c.values, c.labels, c.body, c.variant, c.assetId, c.sfx], ['chart', 'full', [10, 5], ['a', 'b', '$'], 'b', 'speech', 'img', 'none']);
+});

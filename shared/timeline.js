@@ -282,7 +282,7 @@ export function applyOp(tlIn, op, ctx = {}) {
     }
     case 'updateGraphic': {
       const i = findIndex(tl.graphics, op.graphicId, 'Motion graphic');
-      const patch = pick(op.patch, ['type', 'start', 'duration', 'text', 'sub', 'items', 'x', 'y', 'color', 'position']);
+      const patch = pick(op.patch, ['type', 'start', 'duration', 'text', 'sub', 'body', 'items', 'values', 'labels', 'x', 'y', 'color', 'position', 'layout', 'variant', 'assetId', 'sfx']);
       tl.graphics[i] = { ...cleanGraphic(patch, tl.graphics[i]), id: tl.graphics[i].id };
       tl.graphics.sort((a, b) => a.start - b.start);
       break;
