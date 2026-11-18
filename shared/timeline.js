@@ -43,6 +43,30 @@ export const BROLL_LAYOUTS = { full: 'Full screen', split: 'Split screen (top ha
 
 export const STORY_ROLES = ['hook', 'context', 'progression', 'payoff', 'cta'];
 
+/** Editing frame rate (exports are 30 fps). */
+export const FPS = 30;
+export const MIN_CAPTION = 2 / FPS;
+export const toFrames = (s) => Math.round(s * FPS);
+export const snapFrame = (s) => Math.round(s * FPS) / FPS;
+/** 75.5 → "01:15:15" (minutes:seconds:frames) */
+export function formatTimecode(s) {
+  const f = Math.max(0, toFrames(s));
+  const m = Math.floor(f / (60 * FPS));
+  const sec = Math.floor((f % (60 * FPS)) / FPS);
+  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}:${String(f % FPS).padStart(2, '0')}`;
+}
+/** Accepts "mm:ss:ff", "ss:ff", "12.5" (seconds) or "37f" (frames). Returns seconds or null. */
+export function parseTimecode(str) {
+  const t = String(str).trim();
+  if (/^\d+f$/i.test(t)) return parseInt(t, 10) / FPS;
+  if (/^\d+(\.\d+)?$/.test(t)) return Number(t);
+  const parts = t.split(':').map((x) => Number(x));
+  if (parts.length < 2 || parts.length > 3 || parts.some((x) => !Number.isFinite(x) || x < 0)) return null;
+  const [m, sec, fr] = parts.length === 3 ? parts : [0, ...parts];
+  if (!Number.isInteger(fr) || fr >= FPS || (parts.length === 3 && sec >= 60)) return null;
+  return Math.round((m * 60 + sec + fr / FPS) * 1000) / 1000;
+}
+
 export function uid(prefix = 'id') {
   const r = Math.random().toString(36).slice(2, 8);
   const t = Date.now().toString(36).slice(-4);
@@ -125,7 +149,9 @@ export function timelineCaptions(tl) {
       if (cap.assetId !== c.assetId) continue;
       const s = Math.max(cap.start, c.in);
       const e = Math.min(cap.end, c.out);
-      if (e - s < 0.15) continue;
+      // Skip slivers where a caption crosses a cut, but keep short captions that sit wholly in the clip.
+      const whole = s === cap.start && e === cap.end;
+      if (e - s < (whole ? MIN_CAPTION - 1e-6 : 0.15)) continue;
       out.push({
         id: cap.id,
         clipId: c.id,
@@ -136,6 +162,66 @@ export function timelineCaptions(tl) {
     }
   }
   return out.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * Retime a caption from timeline positions (what you see on the timeline), Premiere-style.
+ * Captions live in SOURCE time and follow their clip, so the new edges are converted through the
+ * clip the caption chip sits in. Edges snap to frames, stay inside that clip, keep at least
+ * MIN_CAPTION, and never overlap the neighbouring captions of the same file (stretching an edge into a
+ * neighbour trims that neighbour instead; moving stops at it).
+ * edit: { start } | { end } | { move } (timeline seconds; move = offset). chipIndex: which piece
+ * of the caption (a caption can show in several clips). Returns { start, end } or null.
+ */
+export function retimeCaption(tlIn, captionId, edit, chipIndex = 0) {
+  const tl = normalizeTimeline(tlIn);
+  const cap = tl.captions.items.find((c) => c.id === captionId);
+  const chips = timelineCaptions(tl).filter((c) => c.id === captionId);
+  const chip = chips[chipIndex] || chips[0];
+  if (!cap || !chip) return null;
+  const clip = layout(tl).clips.find((c) => c.id === chip.clipId);
+  const toSrc = (x) => clip.in + (x - clip.tlStart);
+  const inClip = (x) => Math.max(clip.tlStart, Math.min(clip.tlEnd, x));
+  const same = tl.captions.items.filter((c) => c.assetId === cap.assetId && c.id !== cap.id);
+  const before = same.filter((c) => c.end <= cap.start + 1e-6).sort((a, b) => b.end - a.end)[0];
+  const after = same.filter((c) => c.start >= cap.end - 1e-6).sort((a, b) => a.start - b.start)[0];
+  let s = cap.start;
+  let e = cap.end;
+  const neighbours = [];
+  if (edit.move != null) {
+    // Moving never pushes other captions: it stops at them.
+    const lo = before ? before.end : 0;
+    const hi = after ? after.start : Infinity;
+    const len = e - s;
+    const ns = toSrc(inClip(snapFrame(chip.start + edit.move)));
+    s = Math.max(lo, Math.min(hi - len, ns, toSrc(clip.tlEnd) - len));
+    e = s + len;
+  }
+  // Stretching an edge into a neighbour is a rolling edit: the neighbour gives up the time,
+  // down to MIN_CAPTION (Premiere's rolling-edit behaviour for back-to-back captions).
+  if (edit.start != null) {
+    const lo = before ? before.start + MIN_CAPTION : 0;
+    s = Math.max(lo, Math.min(e - MIN_CAPTION, toSrc(inClip(snapFrame(edit.start)))));
+    if (before && s < before.end - 1e-6) neighbours.push({ id: before.id, end: round(s) });
+  }
+  if (edit.end != null) {
+    const hi = after ? after.end - MIN_CAPTION : Infinity;
+    e = Math.min(hi, Math.max(s + MIN_CAPTION, toSrc(inClip(snapFrame(edit.end)))));
+    if (after && e > after.start + 1e-6) neighbours.push({ id: after.id, start: round(e) });
+  }
+  return { start: round(s), end: round(e), neighbours };
+}
+
+/** The ops for a retime (the caption plus any neighbour it rolled into), or [] when nothing changes. */
+export function retimeCaptionOps(tl, captionId, edit, chipIndex = 0) {
+  const r = retimeCaption(tl, captionId, edit, chipIndex);
+  const cap = normalizeTimeline(tl).captions.items.find((c) => c.id === captionId);
+  if (!r || !cap || (Math.abs(r.start - cap.start) < 1e-6 && Math.abs(r.end - cap.end) < 1e-6)) return [];
+  return [
+    // Shrink neighbours first so each op is valid on its own.
+    ...r.neighbours.map(({ id, ...patch }) => ({ type: 'updateCaption', captionId: id, patch })),
+    { type: 'updateCaption', captionId, patch: { start: r.start, end: r.end } },
+  ];
 }
 
 function findIndex(list, id, what) {
@@ -234,7 +320,15 @@ export function applyOp(tlIn, op, ctx = {}) {
       const i = findIndex(tl.captions.items, op.captionId, 'Caption');
       const patch = pick(op.patch, ['text', 'start', 'end']);
       if ('text' in patch) patch.text = String(patch.text).slice(0, 200);
-      Object.assign(tl.captions.items[i], patch);
+      const cap = tl.captions.items[i];
+      const s = 'start' in patch ? Number(patch.start) : cap.start;
+      const e = 'end' in patch ? Number(patch.end) : cap.end;
+      if (!Number.isFinite(s) || !Number.isFinite(e)) throw new Error('Caption times must be numbers');
+      if (e - s < MIN_CAPTION - 1e-6) throw new Error(`A caption must last at least ${Math.round(MIN_CAPTION * FPS)} frames`);
+      if ('start' in patch) patch.start = round(Math.max(0, s));
+      if ('end' in patch) patch.end = round(e);
+      Object.assign(cap, patch);
+      tl.captions.items.sort((a, b) => a.start - b.start);
       break;
     }
     case 'deleteCaption': {

@@ -136,6 +136,7 @@ Clips can be up to about 25 minutes.
   - Top panels push the speaker down and full-screen cards cover the frame.
   - All of them are drawn by one Canvas 2D implementation in the preview and the export.
 - Animated captions (pill, pop, editorial, karaoke): word by word, with keyword colour. Bangla works, thanks to Hind Siliguri and canvas rendering.
+- Premiere-style timing: drag a caption's edges to stretch it (it rolls into the next caption), or set In / Out / Duration to the frame. Scrub by dragging the playhead or the ruler, and use ←/→ to step one frame (Shift for one second).
 - B-roll layouts: full screen, split screen (speaker below), photo card. Images get a slow pan.
 - Punch-in zooms per clip, and synthesised sound effects (pop, whoosh, ding, click) on graphics and B-roll.
 - Transcription with OpenAI (timed lines split at pauses), or import .srt/.vtt

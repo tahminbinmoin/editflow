@@ -249,10 +249,22 @@ input[type='range'] { accent-color: var(--accent); width: 100%; }
 .tl-chip.gfx .sw { width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; flex: none; }
 .tl-chip.broll { background: rgba(243, 183, 94, .18); color: var(--warm); }
 .tl-chip.broll.empty { background: transparent; border: 1.5px dashed rgba(243, 183, 94, .6); }
-.tl-chip.cap { background: rgba(245, 240, 233, .08); color: var(--text-2); cursor: pointer; font-weight: 500; }
+.tl-chip.cap { background: rgba(245, 240, 233, .08); color: var(--text-2); font-weight: 500; }
 .tl-chip.music { background: rgba(127, 212, 154, .15); color: var(--ok); cursor: default; }
-.tl-playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); z-index: 5; pointer-events: none; }
-.tl-playhead::before { content: ''; position: absolute; top: 0; left: -5px; border: 6px solid transparent; border-top-color: var(--accent); }
+.tl-playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); z-index: 7; pointer-events: none; }
+.tl-playhead::before { content: ''; position: absolute; top: 0; left: -6px; width: 14px; height: 14px; background: var(--accent); clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%); }
+/* A grab area on the playhead: wide on the ruler, thin over the tracks so clips stay clickable */
+.tl-playhead-grab { position: absolute; top: 0; left: -8px; width: 18px; height: 22px; pointer-events: auto; cursor: ew-resize; }
+.tl-playhead.scrubbing { box-shadow: 0 0 0 1px rgba(255, 91, 58, .35); }
+.tl-playhead-time { position: absolute; top: -1px; left: 10px; padding: 2px 6px; border-radius: 5px; background: var(--accent); color: #fff; font-size: 10.5px; white-space: nowrap; pointer-events: none; }
+.tl-ruler { cursor: ew-resize; user-select: none; }
+.tl-ruler.scrubbing, .tl-ruler.scrubbing * { cursor: ew-resize !important; }
+.tl-chip.cap { position: absolute; cursor: grab; padding: 0 9px; }
+.tl-chip.cap.dragging { cursor: grabbing; background: rgba(255, 91, 58, .28); color: #fff; font-variant-numeric: tabular-nums; }
+.tl-cap-edge { position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 2; }
+.tl-cap-edge.l { left: 0; border-left: 2px solid transparent; }
+.tl-cap-edge.r { right: 0; border-right: 2px solid transparent; }
+.tl-chip.cap:hover .tl-cap-edge, .tl-chip.cap.sel .tl-cap-edge { background: rgba(245, 240, 233, .55); }
 .tl-drop { position: absolute; top: 4px; bottom: 4px; width: 3px; background: var(--warm); border-radius: 2px; z-index: 4; }
 
 /* Lists in panels */

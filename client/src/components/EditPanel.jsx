@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Scissors, Trash2, Type, Clapperboard, ChevronLeft, Sparkles, Search, ImagePlus, ExternalLink } from 'lucide-react';
-import { layout, timelineCaptions, formatTime, TRANSITIONS, OVERLAY_TEMPLATES, CAPTION_STYLES, STORY_ROLES, ASPECTS, BROLL_LAYOUTS } from '@shared/timeline.js';
+import { layout, timelineCaptions, formatTime, retimeCaptionOps, formatTimecode, parseTimecode, toFrames, FPS, TRANSITIONS, OVERLAY_TEMPLATES, CAPTION_STYLES, STORY_ROLES, ASPECTS, BROLL_LAYOUTS } from '@shared/timeline.js';
 import { GRAPHIC_TYPES, GRAPHIC_COLORS, GRAPHIC_POSITIONS, GRAPHIC_LAYOUTS } from '@shared/graphics.js';
 import { THEMES } from '@shared/gfx-core.js';
 import { useAuth } from '../App.jsx';
@@ -130,6 +130,28 @@ function Num({ value, onCommit, step = 0.1, min, max, label, suffix = 's' }) {
   );
 }
 
+/** Frame-accurate timecode field (mm:ss:ff). Accepts "00:04:12", "4:12", "4.4" (seconds) or "132f". */
+function Timecode({ value, onCommit, label, title }) {
+  const [v, setV] = useState(formatTimecode(value));
+  useEffect(() => setV(formatTimecode(value)), [value]);
+  const commit = () => {
+    const n = parseTimecode(v);
+    if (n == null) return setV(formatTimecode(value));
+    if (Math.abs(n - value) > 1e-6) onCommit(n);
+  };
+  const step = (f) => onCommit(Math.round((value + f / FPS) * FPS) / FPS);
+  return (
+    <div className="field" style={{ flex: 1 }}>
+      <label title={title}>{label}</label>
+      <div className="row" style={{ gap: 4 }}>
+        <button className="btn xs" onClick={() => step(-1)} aria-label={`${label} one frame earlier`} title="−1 frame">−</button>
+        <input className="input sm mono" value={v} onChange={(e) => setV(e.target.value)} onBlur={commit} onKeyDown={(e) => e.key === 'Enter' && commit()} aria-label={label} />
+        <button className="btn xs" onClick={() => step(1)} aria-label={`${label} one frame later`} title="+1 frame">+</button>
+      </div>
+    </div>
+  );
+}
+
 function Txt({ value, onCommit, label, area }) {
   const [v, setV] = useState(value);
   useEffect(() => setV(value), [value]);
@@ -138,6 +160,41 @@ function Txt({ value, onCommit, label, area }) {
     <div className="field">
       <label>{label}</label>
       <Tag className={area ? 'textarea' : 'input sm'} rows={area ? 2 : undefined} value={v} onChange={(e) => setV(e.target.value)} onBlur={() => v !== value && onCommit(v)} onKeyDown={(e) => !area && e.key === 'Enter' && v !== value && onCommit(v)} />
+    </div>
+  );
+}
+
+/** Premiere-style In / Out / Duration for one caption, in timeline timecode, one-frame steps. */
+function CaptionTiming({ timeline, cap, time, ops, onSeek, readOnly }) {
+  const chips = timelineCaptions(timeline).filter((c) => c.id === cap.id);
+  if (!chips.length) return <p className="tiny muted">This caption isn't on the timeline right now (its part of the clip was trimmed away).</p>;
+  // When a caption shows in more than one clip, edit the copy under the playhead.
+  let index = chips.findIndex((c) => time >= c.start - 1e-6 && time <= c.end + 1e-6);
+  if (index < 0) index = 0;
+  const chip = chips[index];
+  const frames = toFrames(chip.end - chip.start);
+  const apply = (edit, label) => {
+    const list = retimeCaptionOps(timeline, cap.id, edit, index);
+    if (list.length) ops(list, label);
+  };
+  if (readOnly) {
+    return <p className="small mono">{formatTimecode(chip.start)} → {formatTimecode(chip.end)} · {frames} frames</p>;
+  }
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <div className="row" style={{ gap: 8 }}>
+        <Timecode label="In" title="Where the caption starts (mm:ss:ff)" value={chip.start} onCommit={(t) => apply({ start: t }, 'Caption in point')} />
+        <Timecode label="Out" title="Where the caption ends (mm:ss:ff)" value={chip.end} onCommit={(t) => apply({ end: t }, 'Caption out point')} />
+      </div>
+      <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
+        <Num label="Duration" suffix={`frames · ${(frames / FPS).toFixed(2)}s`} step={1} min={2} value={frames} onCommit={(f) => apply({ end: chip.start + Math.round(f) / FPS }, 'Caption duration')} />
+      </div>
+      <div className="row wrap" style={{ gap: 6 }}>
+        <button className="btn xs" onClick={() => apply({ start: time }, 'Caption in point')} title="Start the caption at the playhead">In at playhead</button>
+        <button className="btn xs" onClick={() => apply({ end: time }, 'Caption out point')} title="End the caption at the playhead">Out at playhead</button>
+        <button className="btn xs ghost" onClick={() => onSeek?.(chip.start)}>Go to in</button>
+        <button className="btn xs ghost" onClick={() => onSeek?.(Math.max(chip.start, chip.end - 1 / FPS))}>Go to out</button>
+      </div>
     </div>
   );
 }
@@ -475,7 +532,8 @@ export default function EditPanel({ project, timeline, selection, onSelect, ops,
         {back}
         <h3 style={{ fontSize: 18 }}>Caption</h3>
         <Txt area label="Text" value={cap.text} onCommit={(v) => ops([{ type: 'updateCaption', captionId: cap.id, patch: { text: v } }], 'Edit caption')} />
-        <p className="tiny muted">Captions follow their clip when you trim or reorder.</p>
+        <CaptionTiming timeline={timeline} cap={cap} time={time} ops={ops} onSeek={onSeek} readOnly={readOnly} />
+        <p className="tiny muted">Drag a caption's edges on the timeline to stretch it, or drag its middle to move it. Captions follow their clip when you trim or reorder.</p>
         <button
           className="btn sm danger"
           onClick={() => {

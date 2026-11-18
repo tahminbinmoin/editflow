@@ -85,6 +85,8 @@ Assets read from a linked folder have `source: 'local', folderId, relPath, lastM
 }
 ```
 
+Frame timing: the editor works in 30 fps frames (`FPS`, `toFrames`, `snapFrame`, `formatTimecode`/`parseTimecode` → `mm:ss:ff`). Captions are retimed from timeline positions with `retimeCaption` / `retimeCaptionOps`. Edges snap to frames and stay inside the caption's clip, and a caption keeps at least `MIN_CAPTION` (2 frames). Stretching into a neighbour rolls that neighbour's edge, while moving a caption stops at its neighbours. The timeline drag, the In/Out/Duration fields and the "In/Out at playhead" buttons all go through these functions.
+
 ## Recipes
 
 ### Add an edit operation (e.g. clip speed)

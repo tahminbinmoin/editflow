@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyTimeline, applyOp, applyOps, layout, timelineCaptions, diffSummary, normalizeTimeline } from '../shared/timeline.js';
+import { emptyTimeline, applyOp, applyOps, layout, timelineCaptions, diffSummary, normalizeTimeline, retimeCaption, retimeCaptionOps, formatTimecode, parseTimecode, toFrames, FPS } from '../shared/timeline.js';
 import { cleanPlan, planToTimeline, chunkCaption } from '../shared/plan.js';
 import { parseTranscriptFile } from '../shared/transcript.js';
 import { extractJson } from '../server/ai/providers.js';
@@ -334,4 +334,53 @@ test('motion graphics: every editable field can be changed after adding (layout,
     { type: 'updateGraphic', graphicId: 'g1', patch: { body: 'b', variant: 'speech', assetId: 'img', sfx: 'none' } },
   ]).timeline.graphics[0];
   assert.deepEqual([c.type, c.layout, c.values, c.labels, c.body, c.variant, c.assetId, c.sfx], ['chart', 'full', [10, 5], ['a', 'b', '$'], 'b', 'speech', 'img', 'none']);
+});
+
+test('captions: frame-accurate timecodes and Premiere-style stretching', () => {
+  assert.equal(formatTimecode(0), '00:00:00');
+  assert.equal(formatTimecode(4.4), '00:04:12');
+  assert.equal(formatTimecode(61 + 29 / 30), '01:01:29');
+  assert.equal(parseTimecode('00:04:12'), 4.4);
+  assert.equal(parseTimecode('4:12'), 4.4);
+  assert.equal(parseTimecode('4.4'), 4.4);
+  assert.equal(parseTimecode('132f'), 4.4);
+  assert.equal(parseTimecode('nonsense'), null);
+  assert.equal(parseTimecode('00:01:45'), null, 'frames must be below the frame rate');
+
+  // Clip shows source 10–20 at timeline 0–10; captions in source time.
+  const tl = normalizeTimeline({
+    clips: [{ id: 'c1', assetId: 'a1', in: 10, out: 20 }],
+    captions: { items: [
+      { id: 'k1', assetId: 'a1', start: 11, end: 12, text: 'one' },
+      { id: 'k2', assetId: 'a1', start: 12.5, end: 13.5, text: 'two' },
+    ] },
+  });
+  // Stretching into the gap is free; stretching into the next caption rolls its start (it keeps 2 frames).
+  assert.deepEqual(retimeCaption(tl, 'k1', { end: 2.4 }), { start: 11, end: 12.4, neighbours: [] });
+  assert.deepEqual(retimeCaption(tl, 'k1', { end: 3 }), { start: 11, end: 13, neighbours: [{ id: 'k2', start: 13 }] });
+  const far = retimeCaption(tl, 'k1', { end: 9 });
+  assert.equal(far.end, 13.433);
+  assert.deepEqual(far.neighbours, [{ id: 'k2', start: 13.433 }]);
+  const { timeline: rolled, errors } = applyOps(tl, retimeCaptionOps(tl, 'k1', { end: 3 }));
+  assert.deepEqual(errors, []);
+  assert.deepEqual(rolled.captions.items.map((c) => [c.id, c.start, c.end]), [['k1', 11, 13], ['k2', 13, 13.5]]);
+  assert.deepEqual(retimeCaptionOps(tl, 'k1', { end: 2 }), [], 'no-op edits make no history step');
+  // Out point snaps to a whole frame.
+  const r = retimeCaption(tl, 'k1', { end: 1.51 });
+  assert.equal(toFrames(r.end - r.start), toFrames(0.5));
+  // Pull the in point earlier, never before the clip.
+  assert.deepEqual(retimeCaption(tl, 'k1', { start: -3 }), { start: 10, end: 12, neighbours: [] });
+  // Can't shrink below two frames.
+  const tiny = retimeCaption(tl, 'k1', { end: 0.2 });
+  assert.equal(toFrames(tiny.end - tiny.start), 2);
+  // Move keeps the length and stays clear of the neighbour.
+  assert.deepEqual(retimeCaption(tl, 'k1', { move: 5 }), { start: 11.5, end: 12.5, neighbours: [] });
+
+  // updateCaption retimes, keeps order, and refuses impossible timings.
+  const t2 = applyOp(tl, { type: 'updateCaption', captionId: 'k1', patch: { start: tiny.start, end: tiny.end } });
+  const chip = timelineCaptions(t2).find((c) => c.id === 'k1');
+  assert.ok(chip, 'a 2-frame caption still shows on the timeline');
+  assert.equal(toFrames(chip.end - chip.start), 2);
+  assert.throws(() => applyOp(tl, { type: 'updateCaption', captionId: 'k1', patch: { end: 11 + 1 / FPS } }), /at least 2 frames/);
+  assert.throws(() => applyOp(tl, { type: 'updateCaption', captionId: 'k1', patch: { start: 'x' } }));
 });

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Scissors, Trash2, ZoomIn, Type, Clapperboard, Sparkles } from 'lucide-react';
-import { layout, timelineCaptions, formatTime } from '@shared/timeline.js';
+import { layout, timelineCaptions, formatTime, retimeCaption, retimeCaptionOps, toFrames, FPS, formatTimecode } from '@shared/timeline.js';
 import { GRAPHIC_TYPES, GRAPHIC_COLORS, graphicLabel } from '@shared/graphics.js';
 
 const peakCache = new Map();
@@ -72,14 +72,73 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
   const innerW = Math.max(width, x(span) + 24);
   const tickStep = [0.5, 1, 2, 5, 10, 15, 30, 60].find((s) => s * pps >= 64) || 120;
 
-  const seekFromEvent = (e) => {
+  const timeAt = (clientX) => {
     const r = scrollRef.current.getBoundingClientRect();
-    const t = (e.clientX - r.left + scrollRef.current.scrollLeft) / pps;
-    onSeek(Math.max(0, Math.min(duration, t)));
+    return Math.max(0, Math.min(duration, (clientX - r.left + scrollRef.current.scrollLeft) / pps));
+  };
+  const seekFromEvent = (e) => onSeek(Math.round(timeAt(e.clientX) * FPS) / FPS);
+
+  // Scrub: press on the ruler or the playhead and drag; the view follows near the edges.
+  const [scrubbing, setScrubbing] = useState(false);
+  const startScrub = (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setScrubbing(true);
+    seekFromEvent(e);
+    const el = scrollRef.current;
+    let lastX = e.clientX;
+    let raf = 0;
+    const edge = () => {
+      const r = el.getBoundingClientRect();
+      const d = lastX > r.right - 40 ? 14 : lastX < r.left + 40 ? -14 : 0;
+      if (d) {
+        el.scrollLeft += d;
+        onSeek(Math.round(timeAt(lastX) * FPS) / FPS);
+      }
+      raf = requestAnimationFrame(edge);
+    };
+    raf = requestAnimationFrame(edge);
+    const move = (ev) => {
+      lastX = ev.clientX;
+      onSeek(Math.round(timeAt(ev.clientX) * FPS) / FPS);
+    };
+    const up = () => {
+      cancelAnimationFrame(raf);
+      setScrubbing(false);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  // Caption retiming while dragging (snaps to frames, to the playhead, stays inside its clip).
+  const SNAP_PX = 8;
+  const captionEdit = (chip, mode, dx) => {
+    const snapToHead = (v) => (Math.abs(v - time) * pps < SNAP_PX ? time : v);
+    if (mode === 'trimL') return { start: snapToHead(chip.start + dx / pps) };
+    if (mode === 'trimR') return { end: snapToHead(chip.end + dx / pps) };
+    const ns = chip.start + dx / pps;
+    const ne = chip.end + dx / pps;
+    return { move: Math.abs(ns - time) * pps < SNAP_PX ? time - chip.start : Math.abs(ne - time) * pps < SNAP_PX ? time - chip.end : dx / pps };
+  };
+  /** Where a caption chip would sit (timeline seconds) after an edit, for the drag preview. */
+  const capDrag = useMemo(() => {
+    if (drag?.kind !== 'caption') return null;
+    const chip = caps.filter((k) => k.id === drag.id)[drag.index || 0];
+    return chip ? { chip, res: retimeCaption(timeline, drag.id, captionEdit(chip, drag.mode, drag.dx), drag.index || 0) } : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drag, timeline, caps]);
+  const chipAfter = (chip, res) => {
+    const c = clips.find((k) => k.id === chip.clipId);
+    if (!c || !res) return chip;
+    const toTl = (src) => c.tlStart + (src - c.in);
+    return { start: Math.max(c.tlStart, toTl(res.start)), end: Math.min(c.tlEnd, toTl(res.end)) };
   };
 
   // Generic pointer drag: mode = 'move' | 'trimL' | 'trimR'
-  const startDrag = (e, kind, id, mode) => {
+  const startDrag = (e, kind, id, mode, extra) => {
     if (readOnly) return;
     e.stopPropagation();
     e.preventDefault();
@@ -88,7 +147,7 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
     const move = (ev) => {
       const dx = ev.clientX - startX;
       if (Math.abs(dx) > 4) moved = true;
-      if (moved) setDrag({ kind, id, mode, dx });
+      if (moved) setDrag({ kind, id, mode, dx, index: extra?.index });
     };
     const up = (ev) => {
       window.removeEventListener('pointermove', move);
@@ -98,9 +157,15 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
       if (!moved) {
         onSelect({ type: kind, id });
         if (kind === 'clip') seekFromEvent(ev);
+        if (kind === 'caption') onSeek(extra.chip.start + 0.01);
         return;
       }
       const dt = dx / pps;
+      if (kind === 'caption') {
+        const list = retimeCaptionOps(timeline, id, captionEdit(extra.chip, mode, dx), extra.index);
+        if (list.length) ops(list, mode === 'move' ? 'Move caption' : 'Retime caption');
+        return;
+      }
       if (kind === 'clip') {
         const c = clips.find((k) => k.id === id);
         if (mode === 'trimL') ops([{ type: 'trimClip', clipId: id, in: Math.max(0, Math.min(c.out - 0.1, c.in + dt)) }], 'Trim clip start');
@@ -188,7 +253,7 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
         </div>
         <div className="tl-scroll" ref={scrollRef}>
           <div className="tl-inner" style={{ width: innerW, paddingLeft: 0 }}>
-            <div className="tl-ruler" onPointerDown={seekFromEvent}>
+            <div className={`tl-ruler ${scrubbing ? 'scrubbing' : ''}`} onPointerDown={startScrub} title="Click or drag to move the playhead">
               {Array.from({ length: Math.ceil(span / tickStep) + 1 }, (_, i) => (
                 <div key={i} className="tl-tick" style={{ left: x(i * tickStep) }}>
                   {formatTime(i * tickStep).replace(/\.0$/, '')}
@@ -298,21 +363,33 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
               })}
             </div>
             <div className="tl-track" style={{ opacity: timeline.captions.enabled ? 1 : 0.35 }}>
-              {caps.map((c, i) => (
-                <div
-                  key={`${c.id}-${i}`}
-                  className={`tl-chip cap ${selection?.id === c.id ? 'sel' : ''}`}
-                  style={{ left: x(c.start), width: Math.max(8, x(c.end - c.start) - 2) }}
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                    onSelect({ type: 'caption', id: c.id });
-                    onSeek(c.start + 0.01);
-                  }}
-                  title={c.text}
-                >
-                  {c.text}
-                </div>
-              ))}
+              {caps.map((c, i) => {
+                const index = caps.slice(0, i).filter((k) => k.id === c.id).length;
+                const d = drag?.kind === 'caption' && drag.id === c.id && drag.index === index ? drag : null;
+                // A neighbour being rolled into shows its new length live too.
+                const nb = capDrag?.res?.neighbours?.find((n) => n.id === c.id);
+                const src = timeline.captions.items.find((k) => k.id === c.id);
+                const shown = d ? chipAfter(c, capDrag?.res) : nb && src ? chipAfter(c, { ...src, ...nb }) : c;
+                const sel = selection?.id === c.id;
+                const len = shown.end - shown.start;
+                return (
+                  <div
+                    key={`${c.id}-${i}`}
+                    className={`tl-chip cap ${sel ? 'sel' : ''} ${d ? 'dragging' : ''}`}
+                    style={{ left: x(shown.start), width: Math.max(8, x(len) - 2), zIndex: d ? 6 : undefined }}
+                    onPointerDown={(e) => startDrag(e, 'caption', c.id, 'move', { chip: c, index })}
+                    title={`${c.text}\n${formatTimecode(c.start)} → ${formatTimecode(c.end)} · ${toFrames(c.end - c.start)} frames\nDrag the edges to change how long it shows`}
+                  >
+                    {d ? `${len.toFixed(2)}s · ${toFrames(len)}f` : c.text}
+                    {!readOnly && (
+                      <>
+                        <div className="tl-cap-edge l" onPointerDown={(e) => startDrag(e, 'caption', c.id, 'trimL', { chip: c, index })} aria-label="Change caption start" />
+                        <div className="tl-cap-edge r" onPointerDown={(e) => startDrag(e, 'caption', c.id, 'trimR', { chip: c, index })} aria-label="Change caption end" />
+                      </>
+                    )}
+                  </div>
+                );
+              })}
             </div>
             <div className="tl-track">
               {timeline.music.assetId && duration > 0 && (
@@ -326,7 +403,10 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
                 </div>
               )}
             </div>
-            <div className="tl-playhead" style={{ left: x(time) }} />
+            <div className={`tl-playhead ${scrubbing ? 'scrubbing' : ''}`} style={{ left: x(time) }}>
+              <div className="tl-playhead-grab" onPointerDown={startScrub} title={`${formatTimecode(time)} — drag to scrub`} />
+              {scrubbing && <div className="tl-playhead-time mono">{formatTimecode(time)}</div>}
+            </div>
           </div>
         </div>
       </div>

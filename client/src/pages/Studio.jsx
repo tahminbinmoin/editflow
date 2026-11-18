@@ -127,9 +127,14 @@ export default function Studio() {
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         deleteSelected();
       } else if (e.key === 'ArrowLeft') {
-        setTime((t) => Math.max(0, t - (e.shiftKey ? 1 : 0.1)));
+        // one frame (Shift: one second), like Premiere
+        e.preventDefault();
+        setPlaying(false);
+        setTime((t) => Math.max(0, Math.round((t - (e.shiftKey ? 1 : 1 / 30)) * 30) / 30));
       } else if (e.key === 'ArrowRight') {
-        setTime((t) => Math.min(totalDuration(timeline), t + (e.shiftKey ? 1 : 0.1)));
+        e.preventDefault();
+        setPlaying(false);
+        setTime((t) => Math.min(totalDuration(timeline), Math.round((t + (e.shiftKey ? 1 : 1 / 30)) * 30) / 30));
       } else if (e.key === 'Escape') setSelection(null);
     };
     window.addEventListener('keydown', onKey);

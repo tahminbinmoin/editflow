@@ -287,7 +287,7 @@ export default function Player({ urls, timeline, assets, time, onTime, playing, 
           {formatTime(time)} / {formatTime(duration)}
         </span>
         <span className="tiny muted desktop-only">
-          <span className="kbd">Space</span> play · preview is approximate, export is exact
+          <span className="kbd">Space</span> play · <span className="kbd">←</span><span className="kbd">→</span> 1 frame · preview is approximate, export is exact
         </span>
       </div>
     </div>
