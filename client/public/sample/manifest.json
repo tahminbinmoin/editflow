@@ -1,0 +1,175 @@
+{
+ "note": "Sample project — placeholder footage, a synthetic speech tone and a written sample transcript.",
+ "assets": [
+  {
+   "kind": "footage",
+   "name": "sample-talking-head.mp4",
+   "url": "/sample/sample-talking-head.mp4",
+   "thumbUrl": "/sample/sample-talking-head-thumb.jpg",
+   "peaksUrl": "/sample/sample-talking-head-peaks.json",
+   "thumb": true,
+   "hasPeaks": true,
+   "size": 739854,
+   "duration": 61.5,
+   "width": 1280,
+   "height": 720,
+   "hasVideo": true,
+   "hasAudio": true,
+   "status": "ready",
+   "progress": 1,
+   "sample": true,
+   "silences": [
+    {
+     "start": 0,
+     "end": 0.6
+    },
+    {
+     "start": 3.4,
+     "end": 4.6
+    },
+    {
+     "start": 8.9,
+     "end": 9.8
+    },
+    {
+     "start": 14.2,
+     "end": 16
+    },
+    {
+     "start": 20.3,
+     "end": 21.1
+    },
+    {
+     "start": 25.6,
+     "end": 27.4
+    },
+    {
+     "start": 31,
+     "end": 31.8
+    },
+    {
+     "start": 36.2,
+     "end": 38.4
+    },
+    {
+     "start": 39.4,
+     "end": 40.2
+    },
+    {
+     "start": 44.8,
+     "end": 45.6
+    },
+    {
+     "start": 50,
+     "end": 50.9
+    },
+    {
+     "start": 55,
+     "end": 56.5
+    },
+    {
+     "start": 60.2,
+     "end": 61.5
+    }
+   ]
+  },
+  {
+   "kind": "broll",
+   "name": "sample-broll.mp4",
+   "url": "/sample/sample-broll.mp4",
+   "thumbUrl": "/sample/sample-broll-thumb.jpg",
+   "peaksUrl": "/sample/sample-broll-peaks.json",
+   "thumb": true,
+   "hasPeaks": true,
+   "size": 113787,
+   "duration": 8,
+   "width": 1280,
+   "height": 720,
+   "hasVideo": true,
+   "hasAudio": true,
+   "status": "ready",
+   "progress": 1,
+   "sample": true
+  },
+  {
+   "kind": "music",
+   "name": "sample-music.m4a (generated pad)",
+   "url": "/sample/sample-music.m4a",
+   "thumbUrl": null,
+   "peaksUrl": "/sample/sample-music-peaks.json",
+   "thumb": false,
+   "hasPeaks": true,
+   "size": 264798,
+   "duration": 30,
+   "width": 0,
+   "height": 0,
+   "hasVideo": false,
+   "hasAudio": true,
+   "status": "ready",
+   "progress": 1,
+   "sample": true
+  }
+ ],
+ "lines": [
+  [
+   0.6,
+   3.4,
+   "Okay so, um, today I want to talk about product videos."
+  ],
+  [
+   4.6,
+   8.9,
+   "I filmed over two hundred product videos last year for small brands."
+  ],
+  [
+   9.8,
+   14.2,
+   "And honestly, most of them failed for the same three reasons."
+  ],
+  [
+   16,
+   20.3,
+   "Mistake one: you start with your logo instead of the problem."
+  ],
+  [
+   21.1,
+   25.6,
+   "Nobody scrolls past a hook to see a logo. Show the problem first."
+  ],
+  [
+   27.4,
+   31,
+   "Mistake two: you never show the product in someone’s hand."
+  ],
+  [
+   31.8,
+   36.2,
+   "A close-up of a real person using it does more than any feature list."
+  ],
+  [
+   38.4,
+   39.4,
+   "Um, yeah."
+  ],
+  [
+   40.2,
+   44.8,
+   "Mistake three: your video is too long. Cut it to thirty seconds."
+  ],
+  [
+   45.6,
+   50,
+   "Why do ninety percent of viewers leave in the first three seconds?"
+  ],
+  [
+   50.9,
+   55,
+   "Because the first three seconds didn’t give them a reason to stay."
+  ],
+  [
+   56.5,
+   60.2,
+   "Follow for part two, where I fix a real brand’s video live."
+  ]
+ ]
+}
