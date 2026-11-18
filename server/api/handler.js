@@ -9,10 +9,12 @@ import { createClient } from '@supabase/supabase-js';
 import { DEFAULT_SUPABASE_URL, DEFAULT_SUPABASE_PUBLISHABLE_KEY, MEDIA_BUCKET } from '../../shared/config.js';
 import { PROVIDERS, SUBSCRIPTION_INFO, extractJson } from '../ai/providers.js';
 import { encrypt, decrypt, mask } from '../lib/secrets.js';
-import { planPrompt, refinePrompt, referencePrompt, visualsPrompt } from '../../shared/prompts.js';
+import { planPrompt, refinePrompt, referencePrompt, visualsPrompt, pickerPrompt } from '../../shared/prompts.js';
+import { STOCK_SOURCES, searchStock, resolveStock, pickFile, download, generateImage } from '../media/stock.js';
 import { wavInfo, wavSamples, speechChunks, wavSlice, mapLimit } from '../../shared/speech.js';
 import { cleanGraphic, fitGraphics, GRAPHIC_TYPES } from '../../shared/graphics.js';
-import { normalizeTimeline, totalDuration } from '../../shared/timeline.js';
+import { normalizeTimeline, totalDuration, layout as tlLayout, timelineCaptions, uid, BROLL_LAYOUTS } from '../../shared/timeline.js';
+import { THEMES } from '../../shared/gfx-core.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || DEFAULT_SUPABASE_PUBLISHABLE_KEY;
@@ -59,7 +61,7 @@ async function upsert(ctx, provider, patch) {
   if (error) throw fail(500, error.message);
 }
 function load(all, id) {
-  const def = PROVIDERS[id];
+  const def = PROVIDERS[id] || STOCK_SOURCES[id];
   if (!def) throw fail(404, 'Unknown provider');
   const r = all[id];
   const config = { ...(def.defaults ? def.defaults() : {}), ...(r?.config || {}) };
@@ -71,7 +73,14 @@ function load(all, id) {
   }
   return { def, config, key };
 }
-const prefsOf = (all) => ({ active: 'rules', ...(all._prefs?.config || {}) });
+const prefsOf = (all) => ({ active: 'rules', aiImages: true, ...(all._prefs?.config || {}) });
+const serverStockKey = (id) => (id === 'pexels' ? process.env.PEXELS_API_KEY : id === 'pixabay' ? process.env.PIXABAY_API_KEY : null) || null;
+/** Stock sources usable right now: [{ id, key }] (the user's own key wins over the app's). */
+function stockKeys(all) {
+  return Object.keys(STOCK_SOURCES)
+    .map((id) => ({ id, key: load(all, id).key || serverStockKey(id) }))
+    .filter((x) => x.key);
+}
 
 async function listProviders(ctx) {
   const all = await rows(ctx);
@@ -94,7 +103,11 @@ async function listProviders(ctx) {
       ready: !!key && !!cfg.model,
     };
   });
-  return { providers, prefs: prefsOf(all), subscriptionNote: SUBSCRIPTION_INFO, transcription: { provider: 'openai', ready: providers.find((p) => p.id === 'openai')?.hasKey || false } };
+  const stock = Object.values(STOCK_SOURCES).map((src) => {
+    const { key } = load(all, src.id);
+    return { ...src, hasKey: !!key, keyMasked: mask(key), serverKey: !!serverStockKey(src.id) };
+  });
+  return { providers, stock, prefs: prefsOf(all), subscriptionNote: SUBSCRIPTION_INFO, transcription: { provider: 'openai', ready: providers.find((p) => p.id === 'openai')?.hasKey || false } };
 }
 
 async function activeEngine(ctx, all) {
@@ -163,39 +176,67 @@ async function runJsonTask(ctx, project, task, prompt, { images = [] } = {}) {
 const REFINE_TYPES = new Set(['trimClip', 'moveClip', 'deleteClip', 'addSegment', 'updateClip', 'setCaptionStyle', 'addOverlay', 'updateOverlay', 'deleteOverlay', 'addBroll', 'deleteBroll', 'updateBroll', 'addGraphic', 'updateGraphic', 'deleteGraphic', 'setMusic', 'setAudio']);
 
 const MAX_FRAMES = 24;
+const keyOf = (all, source) => load(all, source).key || serverStockKey(source);
 const MAX_LIBRARY = 12;
 const b64ok = (d) => typeof d === 'string' && d.length > 100 && d.length < 400_000 && /^[A-Za-z0-9+/=]+$/.test(d.slice(0, 200));
 
-/** Turn the model's visual-analysis reply into timeline ops (validated, clamped to the cut). */
-export function visualsToOps(data, project) {
+const CAPTION_FOR_THEME = { editorial: 'editorial', clean: 'pill', bold: 'pop' };
+const COLOR_FOR_THEME = { editorial: 'accent', clean: 'accent', bold: 'yellow' };
+function cleanVisualOptions(o = {}, p) {
+  const theme = THEMES[o.theme] ? o.theme : normalizeTimeline(p.timeline).style.theme;
+  return { theme, brollAmount: o.brollAmount === 'some' ? 'some' : 'lots', aiImages: o.aiImages !== false, aspect: normalizeTimeline(p.timeline).format.aspect, captions: o.captions === 'keep' ? 'keep' : 'theme' };
+}
+const orientationFor = (layout, aspect) => (layout === 'split' || layout === 'card' ? 'landscape' : aspect === '16:9' ? 'landscape' : aspect === '1:1' ? 'square' : 'portrait');
+
+/**
+ * Turn the model's visual plan into timeline ops (graphics, zooms, captions, look) and B-roll
+ * slots (footage still to be found). Everything is validated and clamped to the cut.
+ */
+export function planVisuals(data, project, opts) {
   const tl = normalizeTimeline(project.timeline);
   const D = totalDuration(tl);
+  const { clips } = tlLayout(tl);
+  const caps = timelineCaptions(tl);
   const library = project.assets.filter((a) => a.kind === 'broll' && a.status === 'ready' && a.hasVideo !== false);
   const libById = Object.fromEntries(library.map((a, i) => [`B${i + 1}`, a]));
   const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
   const ops = [];
   const notes = [];
-  const broll = (Array.isArray(data.broll) ? data.broll : []).slice(0, 12);
-  if (broll.length) for (const b of tl.broll.filter((x) => !x.assetId)) ops.push({ type: 'deleteBroll', brollId: b.id });
-  for (const b of broll) {
-    const start = Math.max(0, Math.min(D - 0.5, num(b.start, 0)));
+  // look + captions
+  ops.push({ type: 'setStyle', patch: { theme: opts.theme, captionColor: COLOR_FOR_THEME[opts.theme] } });
+  const emphasis = (Array.isArray(data.captionEmphasis) ? data.captionEmphasis : []).map((w) => String(w).slice(0, 40)).filter(Boolean).slice(0, 60);
+  ops.push({ type: 'setCaptionStyle', patch: { ...(opts.captions === 'keep' ? {} : { style: CAPTION_FOR_THEME[opts.theme], enabled: true }), emphasis } });
+  // B-roll slots, non-overlapping
+  const slots = [];
+  const raw = (Array.isArray(data.broll) ? data.broll : []).map((b) => ({ ...b, start: num(b.start, 0) })).sort((x, y) => x.start - y.start).slice(0, 16);
+  for (const b of raw) {
+    const start = Math.max(0, Math.min(D - 0.6, b.start));
+    const prev = slots[slots.length - 1];
+    if (prev && start < prev.start + prev.duration - 0.05) continue;
     const lib = libById[String(b.footage || b.assetId || '').trim().toUpperCase()];
-    const duration = Math.max(0.8, Math.min(6, num(b.duration, 2), D - start));
-    ops.push({
-      type: 'addBroll',
-      broll: {
-        start: +start.toFixed(2),
-        duration: +duration.toFixed(2),
-        description: String(b.description || 'Cutaway shot').slice(0, 200),
-        reason: String(b.reason || '').slice(0, 300),
-        assetId: lib ? lib.id : null,
-        srcIn: lib ? Math.max(0, Math.min(Math.max(0, (lib.duration || 0) - duration), num(b.srcIn, 0))) : 0,
-      },
+    const layout = BROLL_LAYOUTS[b.layout] ? b.layout : 'full';
+    const duration = +Math.max(0.8, Math.min(6, num(b.duration, 2.5), D - start)).toFixed(2);
+    const line = caps.filter((c) => c.end > start && c.start < start + duration).map((c) => c.text).join(' ');
+    slots.push({
+      start: +start.toFixed(2),
+      duration,
+      description: String(b.description || 'Cutaway shot').slice(0, 200),
+      reason: String(b.reason || '').slice(0, 300),
+      layout: lib?.mediaType !== 'image' && layout === 'card' && lib ? 'split' : layout,
+      caption: String(b.caption || '').slice(0, 40),
+      kind: b.kind === 'photo' || layout === 'card' ? 'photo' : 'video',
+      queries: (Array.isArray(b.queries) ? b.queries : [b.query]).map((q) => String(q || '').trim().slice(0, 60)).filter(Boolean).slice(0, 3),
+      imagePrompt: String(b.imagePrompt || '').slice(0, 800),
+      assetId: lib ? lib.id : null,
+      srcIn: lib ? Math.max(0, Math.min(Math.max(0, (lib.duration || 0) - duration), num(b.srcIn, 0))) : 0,
+      line: line.slice(0, 200),
     });
   }
+  // graphics
   const incoming = [];
-  for (const g of (Array.isArray(data.graphics) ? data.graphics : []).slice(0, 10)) {
+  for (const g of (Array.isArray(data.graphics) ? data.graphics : []).slice(0, 16)) {
     try {
+      if (g?.type === 'photo') throw new Error('photo cards come in as B-roll');
       const clean = cleanGraphic({ ...g, start: Math.max(0, Math.min(D - 0.6, num(g.start, 0))) });
       clean.duration = Math.min(clean.duration, Math.max(0.6, D - clean.start));
       if (clean.type === 'progress') ((clean.start = 0), (clean.duration = D));
@@ -207,8 +248,72 @@ export function visualsToOps(data, project) {
   }
   const { kept, dropped } = fitGraphics(tl.graphics, incoming);
   for (const g of kept) ops.push({ type: 'addGraphic', graphic: g });
-  for (const g of dropped) notes.push(`Left out the ${GRAPHIC_TYPES[g.type].label.toLowerCase()} “${g.text || g.items[0] || ''}” at ${g.start.toFixed(1)}s: it would cover another graphic.`);
-  return { ops, notes };
+  for (const g of dropped) notes.push(`Left out the ${GRAPHIC_TYPES[g.type].label.toLowerCase()} “${(g.text || g.items[0] || '').replace(/\*/g, '')}” at ${g.start.toFixed(1)}s: it would cover another graphic.`);
+  // B-roll vs graphics: a full-screen card would hide the shot, and a top panel and a split
+  // screen both want the top of the frame — the graphic wins, the shot is left out.
+  const overlaps = (a, b) => a.start < b.start + b.duration && b.start < a.start + a.duration;
+  const blocking = [...tl.graphics, ...kept];
+  for (let i = slots.length - 1; i >= 0; i--) {
+    const s = slots[i];
+    const hit = blocking.find((g) => overlaps(g, s) && (g.layout === 'full' || (g.layout === 'panel' && s.layout === 'split')));
+    if (hit) {
+      notes.push(`Left out the B-roll “${s.description}” at ${s.start.toFixed(1)}s: the ${GRAPHIC_TYPES[hit.type].label.toLowerCase()} uses that part of the frame.`);
+      slots.splice(i, 1);
+    }
+  }
+  // punch-in zooms, at most one per clip
+  const zoomed = new Set();
+  for (const z of (Array.isArray(data.zooms) ? data.zooms : []).slice(0, 12)) {
+    const at = num(z.at, -1);
+    const c = clips.find((k) => at >= k.tlStart && at < k.tlEnd);
+    if (!c || zoomed.has(c.id)) continue;
+    zoomed.add(c.id);
+    ops.push({ type: 'updateClip', clipId: c.id, patch: { zoom: Math.max(1.05, Math.min(1.35, num(z.zoom, 1.18))) } });
+  }
+  return { ops, slots, notes };
+}
+
+/** Stock candidates for one slot: both sources, both queries, deduplicated, best first. */
+async function findCandidates(keys, slot, orientation, perSlot = 4) {
+  const seen = new Set();
+  const lists = [];
+  const errors = [];
+  for (const q of slot.queries.slice(0, 2))
+    for (const { id, key } of keys)
+      lists.push(
+        searchStock(id, key, q, { kind: slot.kind, orientation, perPage: 4 }).catch((e) => {
+          errors.push(e.message);
+          return [];
+        }),
+      );
+  const results = await Promise.all(lists);
+  const out = [];
+  for (let i = 0; out.length < perSlot && i < 6; i++)
+    for (const list of results) {
+      const c = list[i];
+      if (!c || seen.has(`${c.provider}:${c.id}`)) continue;
+      if (c.kind === 'video' && c.duration && c.duration < Math.min(slot.duration, 3)) continue;
+      seen.add(`${c.provider}:${c.id}`);
+      out.push(c);
+      if (out.length >= perSlot) break;
+    }
+  return { candidates: out, errors };
+}
+const publicCandidate = (c) => c && { provider: c.provider, id: c.id, kind: c.kind, thumb: c.thumb, duration: c.duration || 0, width: c.width, height: c.height, author: c.author, authorUrl: c.authorUrl, pageUrl: c.pageUrl };
+
+/** Save downloaded B-roll into the user's project folder in Storage and describe it as an asset. */
+async function storeAsset(ctx, project, { buf, ext, contentType, thumb, fields }) {
+  const id = uid('ast');
+  const base = `${ctx.user.id}/${project.id}/${id}`;
+  const store = ctx.supabase.storage.from(MEDIA_BUCKET);
+  const { error } = await store.upload(`${base}/original${ext}`, buf, { contentType, upsert: true });
+  if (error) throw fail(500, `Could not save the B-roll: ${error.message}`);
+  let thumbPath = null;
+  if (thumb) {
+    const r = await store.upload(`${base}/thumb.jpg`, thumb, { contentType: 'image/jpeg', upsert: true });
+    if (!r.error) thumbPath = `${base}/thumb.jpg`;
+  }
+  return { id, kind: 'broll', status: 'ready', size: buf.length, hasVideo: true, hasAudio: false, path: `${base}/original${ext}`, thumbPath, thumb: !!thumbPath, createdAt: new Date().toISOString(), ...fields };
 }
 
 // ---------- routes ----------
@@ -216,7 +321,8 @@ const routes = [
   ['GET', /^\/engine$/, async (ctx) => {
     const all = await rows(ctx);
     const e = await activeEngine(ctx, all);
-    return { id: e.id, name: e.name, model: e.model || null, vision: !!e.vision, dataUse: e.def?.dataUse || null, fallbackReason: e.fallbackReason || null, transcription: !!load(all, 'openai').key };
+    const openaiKey = !!load(all, 'openai').key;
+    return { id: e.id, name: e.name, model: e.model || null, vision: !!e.vision, dataUse: e.def?.dataUse || null, fallbackReason: e.fallbackReason || null, transcription: openaiKey, images: openaiKey, aiImages: prefsOf(all).aiImages, stock: stockKeys(all).map((k) => k.id) };
   }],
   ['GET', /^\/settings\/ai$/, async (ctx) => {
     const { data } = await ctx.supabase
@@ -269,7 +375,9 @@ const routes = [
     if (!key) throw fail(400, 'Add a key first.');
     let result;
     try {
-      result = await def.test(config, key);
+      result = STOCK_SOURCES[id]
+        ? await searchStock(id, key, 'coffee', { kind: 'video', perPage: 3 }).then((r) => ({ ok: true, models: [], message: `Key accepted. A test search found ${r.length} clips.` }))
+        : await def.test(config, key);
     } catch (e) {
       result = { ok: false, message: e.message, models: [] };
     }
@@ -309,20 +417,151 @@ const routes = [
     const frames = (Array.isArray(body.frames) ? body.frames : []).filter((f) => b64ok(f?.data) && Number.isFinite(Number(f.t))).slice(0, MAX_FRAMES);
     if (frames.length < 2) throw fail(400, 'Could not read frames from the video. Check that the footage plays in the preview.');
     const library = (Array.isArray(body.library) ? body.library : []).filter((f) => b64ok(f?.data) && f.label).slice(0, MAX_LIBRARY);
-    const prompt = visualsPrompt(p, frames.map((f) => Number(f.t)), library.map((f) => f.label));
+    const all = await rows(ctx);
+    const opts = cleanVisualOptions(body.options, p);
+    const keys = stockKeys(all);
+    const aiImages = opts.aiImages && !!load(all, 'openai').key;
+    const prompt = visualsPrompt(p, frames.map((f) => Number(f.t)), library.map((f) => f.label), { ...opts, stock: keys.length > 0, aiImages });
     const images = [
       ...frames.map((f) => ({ label: `CUT FRAME at ${Number(f.t).toFixed(1)}s on the timeline:`, data: f.data })),
       ...library.map((f) => ({ label: `B-ROLL LIBRARY ${f.label}:`, data: f.data })),
     ];
     const { data, meta } = await runJsonTask(ctx, p, 'visuals', prompt, { images });
-    const { ops, notes } = visualsToOps(data, p);
+    const { ops, slots, notes } = planVisuals(data, p, opts);
+    // Find footage for every slot the creator's own clips don't cover.
+    const need = slots.filter((s) => !s.assetId && s.queries.length).slice(0, 10);
+    let searched = 0;
+    if (keys.length) {
+      const errs = new Set();
+      await mapLimit(need, 4, async (s) => {
+        const { candidates, errors } = await findCandidates(keys, s, orientationFor(s.layout, opts.aspect));
+        s.candidates = candidates;
+        searched++;
+        errors.forEach((e) => errs.add(e));
+      });
+      if (errs.size) notes.push(`Stock search: ${[...errs][0]}`);
+    } else if (need.length) notes.push('Connect Pexels or Pixabay in AI settings (free keys) so Editflow can find stock footage automatically.');
+    // Second look: the model compares the candidate thumbnails and picks per slot.
+    const withCands = need.filter((s) => s.candidates?.length);
+    let pickerMeta = null;
+    if (withCands.length) {
+      const thumbs = withCands.flatMap((s, i) => s.candidates.map((c, j) => ({ label: `S${i + 1} C${j + 1}:`, url: c.thumb })));
+      try {
+        const res = await runJsonTask(ctx, p, 'broll-pick', pickerPrompt(p, withCands), { images: thumbs });
+        pickerMeta = res.meta;
+        for (const pk of Array.isArray(res.data.picks) ? res.data.picks : []) {
+          const s = withCands[Number(String(pk.slot || '').replace(/\D/g, '')) - 1];
+          const c = s?.candidates[Number(String(pk.choice || '').replace(/\D/g, '')) - 1];
+          if (s && c) ((s.pick = c), (s.pickWhy = String(pk.why || '').slice(0, 200)));
+        }
+      } catch (e) {
+        // fall back to the first result of each search
+        for (const s of withCands) s.pick = s.candidates[0];
+        notes.push(`Picked the top stock result for each shot (the second look failed: ${e.message.slice(0, 120)}).`);
+      }
+    }
+    const out = slots.map((s) => ({
+      start: s.start,
+      duration: s.duration,
+      description: s.description,
+      reason: s.pickWhy ? `${s.reason} · ${s.pickWhy}`.slice(0, 300) : s.reason,
+      layout: s.layout,
+      caption: s.caption,
+      query: s.queries[0] || '',
+      kind: s.kind,
+      assetId: s.assetId,
+      srcIn: s.srcIn,
+      pick: publicCandidate(s.pick),
+      generate: !s.assetId && !s.pick && aiImages && (s.imagePrompt || s.description) ? (s.imagePrompt || `Realistic photo: ${s.description}`).slice(0, 800) : null,
+    }));
+    const emptyIds = normalizeTimeline(p.timeline).broll.filter((b) => !b.assetId).map((b) => b.id);
     return {
       summary: String(data.summary || 'Visual suggestions').slice(0, 600),
       scenes: (Array.isArray(data.scenes) ? data.scenes : []).slice(0, 30).map((sc) => ({ start: Number(sc.start) || 0, end: Number(sc.end) || 0, what: String(sc.what || '').slice(0, 200) })),
       ops,
+      broll: out,
+      replaceBroll: out.length ? emptyIds : [],
       notes: [...(Array.isArray(data.notes) ? data.notes.map(String).slice(0, 6) : []), ...notes],
-      meta: { ...meta, frames: frames.length, library: library.length },
+      meta: { ...meta, frames: frames.length, library: library.length, stockSearched: searched, stockSources: keys.map((k) => k.id), aiImages, picker: pickerMeta && { model: pickerMeta.model, usage: pickerMeta.usage } },
     };
+  }],
+  ['POST', /^\/broll\/search$/, async (ctx, body) => {
+    const p = await loadProject(ctx, body.projectId);
+    const keys = stockKeys(await rows(ctx));
+    if (!keys.length) throw fail(400, 'Connect Pexels or Pixabay in AI settings to search stock footage.', { code: 'no_stock' });
+    const q = String(body.query || '').trim().slice(0, 100);
+    if (!q) throw fail(400, 'Type what you want to see.');
+    const kind = body.kind === 'photo' ? 'photo' : 'video';
+    const orientation = orientationFor(body.layout, normalizeTimeline(p.timeline).format.aspect);
+    const lists = await Promise.all(keys.map(({ id, key }) => searchStock(id, key, q, { kind, orientation, perPage: 12 }).catch((e) => ({ error: e.message }))));
+    const candidates = [];
+    for (let i = 0; i < 12; i++) for (const l of lists) if (Array.isArray(l) && l[i]) candidates.push(publicCandidate(l[i]));
+    const errors = lists.filter((l) => l.error).map((l) => l.error);
+    if (!candidates.length && errors.length) throw fail(502, errors[0]);
+    return { candidates, sources: keys.map((k) => STOCK_SOURCES[k.id]) };
+  }],
+  ['POST', /^\/broll\/fetch$/, async (ctx, body) => {
+    const p = await loadProject(ctx, body.projectId);
+    const all = await rows(ctx);
+    const source = String(body.provider || '');
+    const key = (keyOf(all, source));
+    if (!STOCK_SOURCES[source] || !key) throw fail(400, 'That stock source is not connected.');
+    const kind = body.kind === 'photo' ? 'photo' : 'video';
+    const c = await resolveStock(source, key, body.id, kind);
+    const file = pickFile(c.files, { minShort: kind === 'photo' ? 900 : 720, maxShort: kind === 'photo' ? 2000 : 1080 });
+    if (!file) throw fail(404, 'No downloadable file for that clip.');
+    const { buf } = await download(file.url, kind === 'photo' ? 20 * 1048576 : 45 * 1048576);
+    const thumb = kind === 'photo' ? null : c.thumb ? await download(c.thumb, 3 * 1048576).then((r) => r.buf).catch(() => null) : null;
+    const asset = await storeAsset(ctx, p, {
+      buf,
+      ext: kind === 'photo' ? '.jpg' : '.mp4',
+      contentType: kind === 'photo' ? 'image/jpeg' : 'video/mp4',
+      thumb: kind === 'photo' ? buf.length < 3 * 1048576 ? buf : null : thumb,
+      fields: {
+        name: `${STOCK_SOURCES[source].name} ${kind} ${c.id}${c.author ? ` · ${c.author}` : ''}`.slice(0, 160),
+        mediaType: kind === 'photo' ? 'image' : 'video',
+        mime: kind === 'photo' ? 'image/jpeg' : 'video/mp4',
+        duration: kind === 'photo' ? 0 : c.duration || 0,
+        width: file.width,
+        height: file.height,
+        stock: { provider: source, id: c.id, pageUrl: c.pageUrl, author: c.author, authorUrl: c.authorUrl, licence: STOCK_SOURCES[source].licence },
+      },
+    });
+    await log(ctx, { project_id: p.id, provider: source, task: 'broll-fetch', ok: true });
+    return { asset };
+  }],
+  ['POST', /^\/broll\/generate$/, async (ctx, body) => {
+    const p = await loadProject(ctx, body.projectId);
+    const def = PROVIDERS.openai;
+    requireConsent(p, 'openai', def.name, def.dataUse, 'images');
+    const all = await rows(ctx);
+    const { config, key } = load(all, 'openai');
+    if (!key) throw fail(400, 'Add your OpenAI API key in AI settings to generate images.');
+    const prompt = String(body.prompt || '').trim().slice(0, 800);
+    if (!prompt) throw fail(400, 'Describe the image.');
+    const orientation = orientationFor(body.layout, normalizeTimeline(p.timeline).format.aspect);
+    try {
+      const img = await generateImage(config, key, `${prompt}\n\nPhotographic, natural light, no text, no logos, no watermarks.`, orientation);
+      const asset = await storeAsset(ctx, p, {
+        buf: img.buf,
+        ext: '.jpg',
+        contentType: 'image/jpeg',
+        thumb: img.buf,
+        fields: { name: `AI image · ${prompt.slice(0, 60)}`, mediaType: 'image', mime: 'image/jpeg', duration: 0, width: img.width, height: img.height, generated: { provider: 'openai', model: img.model, prompt } },
+      });
+      await log(ctx, { project_id: p.id, provider: 'openai', task: 'broll-image', model: img.model, ok: true });
+      return { asset };
+    } catch (e) {
+      await log(ctx, { project_id: p.id, provider: 'openai', task: 'broll-image', model: config.imageModel, ok: false, error: e.message.slice(0, 500) });
+      throw e;
+    }
+  }],
+  ['PUT', /^\/settings\/prefs$/, async (ctx, body) => {
+    const all = await rows(ctx);
+    const next = { ...prefsOf(all) };
+    if ('aiImages' in body) next.aiImages = !!body.aiImages;
+    await upsert(ctx, '_prefs', { config: next });
+    return listProviders(ctx);
   }],
   ['POST', /^\/transcribe\/openai$/, async (ctx, body) => {
     const p = await loadProject(ctx, body.projectId);

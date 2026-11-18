@@ -149,7 +149,7 @@ export default function Studio() {
   const assist = (
     <AIPanel project={project} engine={engine} act={act} busy={busy} status={status} ops={ops} preview={preview} setPreview={setPreview} onSeek={seek} />
   );
-  const edit = <EditPanel project={project} timeline={timeline} selection={selection} onSelect={setSelection} ops={ops} time={time} onSeek={seek} readOnly={showingPending} />;
+  const edit = <EditPanel project={project} timeline={timeline} selection={selection} onSelect={setSelection} ops={ops} act={act} time={time} onSeek={seek} readOnly={showingPending} />;
   const leftPanels = {
     story: <StoryPanel project={project} timeline={timeline} time={time} onSeek={seek} selection={selection} onSelect={selectAndEdit} />,
     transcript: <TranscriptPanel project={project} timeline={timeline} time={time} onSeek={seek} ops={ops} act={act} readOnly={showingPending} busy={busy} status={status} />,
@@ -188,7 +188,7 @@ export default function Studio() {
         )}
         {busy && busy !== 'edit' && (
           <span className="pill info">
-            <span className="spinner" style={{ width: 11, height: 11 }} /> {busy === 'firstCut' ? 'Planning the cut…' : busy === 'refine' ? 'Working on your request…' : busy === 'transcribing' ? status || 'Transcribing…' : busy === 'visuals' ? status || 'Analysing the video…' : busy === 'reference' ? 'Analysing style…' : 'Saving…'}
+            <span className="spinner" style={{ width: 11, height: 11 }} /> {busy === 'firstCut' ? 'Planning the cut…' : busy === 'refine' ? 'Working on your request…' : busy === 'transcribing' ? status || 'Transcribing…' : busy === 'visuals' ? status || 'Analysing the video…' : busy === 'broll' ? 'Adding B-roll…' : busy === 'reference' ? 'Analysing style…' : 'Saving…'}
           </span>
         )}
         <div className="grow" />

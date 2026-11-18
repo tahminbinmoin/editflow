@@ -4,8 +4,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Play, Pause, SkipBack } from 'lucide-react';
 import { layout, timelineCaptions, ASPECTS, formatTime } from '@shared/timeline.js';
-import { drawGraphics } from '@shared/graphics.js';
-import { ensureGraphicsFont } from '../lib/graphicsFrames.js';
+import { drawLayer, videoShiftAt, sfxEvents, SPLIT_FRAC } from '@shared/layer.js';
+import { panelK } from '@shared/graphics.js';
+import { isAnimatedStyle } from '@shared/captions-anim.js';
+import { rand } from '@shared/gfx-core.js';
+import { playSfx } from '@shared/sfx.js';
+import { ensureGraphicsFont, layerImageIds } from '../lib/graphicsFrames.js';
+
+// Live sound effects for the preview (same synth as the export).
+let audioCtx = null;
+const sfxCtx = () => (audioCtx ||= new (window.AudioContext || window.webkitAudioContext)());
 
 export default function Player({ urls, timeline, assets, time, onTime, playing, setPlaying, badge }) {
   const main = useRef();
@@ -43,8 +51,32 @@ export default function Player({ urls, timeline, assets, time, onTime, playing, 
     ensureGraphicsFont().then(() => setFontReady(true));
   }, []);
 
-  // Motion graphics: drawn with the same code the export uses (shared/graphics.js).
-  const graphics = timeline.graphics || [];
+  // Images used by photo cards, decoded once per URL.
+  const [images, setImages] = useState(() => new Map());
+  const imageKey = layerImageIds(timeline).map((id) => `${id}:${urls[id]?.file || ''}`).join('|');
+  useEffect(() => {
+    let alive = true;
+    const next = new Map();
+    Promise.all(
+      layerImageIds(timeline).map(
+        (id) =>
+          urls[id]?.file &&
+          new Promise((res) => {
+            const im = new Image();
+            im.crossOrigin = 'anonymous';
+            im.onload = () => (next.set(id, im), res());
+            im.onerror = res;
+            im.src = urls[id].file;
+          }),
+      ),
+    ).then(() => alive && setImages(next));
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imageKey]);
+
+  // The canvas layer: motion graphics, photo cards and animated captions — the same code the export uses.
   useEffect(() => {
     const c = gfx.current;
     if (!c) return;
@@ -54,8 +86,26 @@ export default function Player({ urls, timeline, assets, time, onTime, playing, 
     if (c.width !== W || c.height !== H) ((c.width = W), (c.height = H));
     const ctx = c.getContext('2d');
     ctx.clearRect(0, 0, W, H);
-    drawGraphics(ctx, graphics, time, W, H);
-  }, [time, graphics, box.w, box.h, fontReady]);
+    drawLayer(ctx, timeline, time, W, H, { images });
+  }, [time, timeline, box.w, box.h, fontReady, images]);
+
+  // Sound effects while playing: fire the ones the playhead just passed.
+  const lastT = useRef(time);
+  const events = useMemo(() => sfxEvents(timeline), [timeline]);
+  useEffect(() => {
+    const prev = lastT.current;
+    lastT.current = time;
+    if (!playing || !events.length || time < prev || time - prev > 0.5) return;
+    const due = events.filter((e) => e.t >= prev && e.t < time);
+    if (!due.length) return;
+    try {
+      const ac = sfxCtx();
+      if (ac.state === 'suspended') ac.resume();
+      for (const e of due) playSfx(ac, e.kind, ac.currentTime + 0.01, ac.destination, timeline.sfx?.volume ?? 0.5);
+    } catch {
+      /* audio not available */
+    }
+  }, [time, playing, events, timeline.sfx]);
 
   const clipAt = (t) => {
     const i = clips.findIndex((c) => t >= c.tlStart && t < c.tlEnd);
@@ -124,8 +174,10 @@ export default function Player({ urls, timeline, assets, time, onTime, playing, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, clips]);
 
-  const activeBroll = timeline.broll.find((b) => time >= b.start && time < b.start + b.duration);
-  const brollAsset = activeBroll?.assetId ? assetMap[activeBroll.assetId] : null;
+  const activeBroll = timeline.broll.find((b) => time >= b.start && time < b.start + b.duration && b.layout !== 'card');
+  const brollAsset0 = activeBroll?.assetId ? assetMap[activeBroll.assetId] : null;
+  const brollImage = brollAsset0?.mediaType === 'image' ? brollAsset0 : null;
+  const brollAsset = brollImage ? null : brollAsset0;
   useEffect(() => {
     const v = broll.current;
     if (!v) return;
@@ -166,6 +218,15 @@ export default function Player({ urls, timeline, assets, time, onTime, playing, 
   const flash = cur && curIdx > 0 && sinceStart < 0.2 ? cur.transitionIn : null;
   const curAsset = cur && assetMap[cur.assetId];
   const fs = box.w;
+  // Speaker push-down (top panels, split B-roll), punch-in zoom, and where B-roll sits.
+  const shiftPx = (videoShiftAt(timeline, time, 1000, 1000 * (aspect.h / aspect.w)) / (1000 * (aspect.h / aspect.w))) * box.h;
+  const zoom = cur?.zoom > 1 ? cur.zoom : 1;
+  const split = activeBroll?.layout === 'split';
+  const k = activeBroll ? panelK(time - activeBroll.start, activeBroll.duration) : 1;
+  const brollBox = split ? { height: box.h * SPLIT_FRAC, top: -box.h * SPLIT_FRAC * (1 - k), bottom: 'auto' } : {};
+  const panDir = activeBroll && rand(activeBroll.id, 3) < 0.5 ? 1 : -1;
+  const panP = activeBroll ? Math.min(1, Math.max(0, (time - activeBroll.start) / activeBroll.duration)) : 0;
+  const panX = ((panDir > 0 ? panP : 1 - panP) - 0.5) * -10.7;
 
   return (
     <div className="stage">
@@ -173,12 +234,17 @@ export default function Player({ urls, timeline, assets, time, onTime, playing, 
         {clips.length ? (
           <div className="frame" style={{ width: box.w, height: box.h }}>
             {badge && <div className="preview-badge">{badge}</div>}
-            <video ref={main} playsInline preload="auto" style={{ opacity: curAsset && !curAsset.hasVideo ? 0 : 1 }} />
-            <video ref={broll} playsInline muted preload="auto" style={{ opacity: brollAsset ? 1 : 0 }} />
+            <video ref={main} playsInline preload="auto" style={{ opacity: curAsset && !curAsset.hasVideo ? 0 : 1, transform: `translateY(${shiftPx}px) scale(${zoom})`, transformOrigin: '50% 38%' }} />
+            <video ref={broll} playsInline muted preload="auto" style={{ opacity: brollAsset ? 1 : 0, ...brollBox }} />
+            {brollImage && urls[brollImage.id]?.file && (
+              <div className="broll-still" style={brollBox}>
+                <img src={urls[brollImage.id].file} alt="" style={{ transform: `scale(1.12) translateX(${panX}%)` }} />
+              </div>
+            )}
             <audio ref={music} preload="auto" />
             <canvas ref={gfx} className="gfx-layer" style={{ width: box.w, height: box.h }} aria-hidden />
             <div className="layer">
-              {activeBroll && !brollAsset && (
+              {activeBroll && !brollAsset0 && (
                 <div className="broll-tag">
                   B-roll idea: {activeBroll.description}
                   <div className="tiny" style={{ fontWeight: 500, opacity: 0.85 }}>
@@ -192,7 +258,7 @@ export default function Player({ urls, timeline, assets, time, onTime, playing, 
                   {o.sub && <div style={{ fontSize: '0.6em', fontWeight: 600, marginTop: 4 }}>{o.sub}</div>}
                 </div>
               ))}
-              {activeCap && (
+              {activeCap && !isAnimatedStyle(timeline.captions.style) && (
                 <div
                   className={`cap-preview cap-${timeline.captions.style}`}
                   style={{ fontSize: fs * 0.064, ...(timeline.captions.position === 'center' ? { top: '50%', transform: 'translateY(-50%)' } : { bottom: '17%' }) }}

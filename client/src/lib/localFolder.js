@@ -9,6 +9,7 @@
 const DB = 'editflow-local';
 const STORE = 'folders';
 const MEDIA_RE = /\.(mp4|mov|m4v|webm|mkv|avi|mp3|wav|m4a|aac|ogg|flac)$/i;
+const IMAGE_RE = /\.(jpe?g|png|webp)$/i;
 const SUB_RE = /\.(srt|vtt)$/i;
 
 export const supportsFolderAccess = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
@@ -36,7 +37,7 @@ const memStore = typeof window !== 'undefined' ? window.__editflowHandleStore : 
 const saveHandle = (id, rec) => (memStore ? Promise.resolve(memStore.set(id, rec)) : idb('readwrite', (s) => s.put(rec, id)));
 const loadHandle = (id) => (memStore ? Promise.resolve(memStore.get(id)) : idb('readonly', (s) => s.get(id)));
 
-export const kindOf = (name) => (SUB_RE.test(name) ? 'subtitle' : /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(name) ? 'audio' : MEDIA_RE.test(name) ? 'video' : null);
+export const kindOf = (name) => (SUB_RE.test(name) ? 'subtitle' : /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(name) ? 'audio' : MEDIA_RE.test(name) ? 'video' : IMAGE_RE.test(name) ? 'image' : null);
 const stemOf = (relPath) => relPath.replace(/\.[^./]+$/, '').toLowerCase();
 /** The caption file (.srt / .vtt) next to a video with the same name, if the listing has one. */
 export const findSidecar = (listing, relPath) => (listing || []).find((x) => x.kind === 'subtitle' && x.relPath !== relPath && stemOf(x.relPath) === stemOf(relPath)) || null;

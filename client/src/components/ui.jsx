@@ -98,11 +98,12 @@ export function ConsentModal({ request, onAllow, onCancel }) {
   const p = request.provider || {};
   const what = {
     audio: 'To transcribe, Editflow uploads this file’s audio track (not the picture) as 16 kHz mono audio, split into short parts at pauses.',
-    frames: 'To analyse the video, Editflow sends about 6–20 small still frames from your cut (and one frame of each B-roll clip), the transcript lines with their times, and your brief. The video file itself isn’t uploaded.',
+    frames: 'To analyse the video, Editflow sends 8–24 small still frames from your cut (and one frame of each B-roll clip), the transcript lines with their times, and your brief. The video file itself isn’t uploaded. Short search phrases (like “barista pouring coffee”) go to the stock libraries you connected.',
+    images: 'To make AI B-roll images, Editflow sends a short description of each missing shot (written from your transcript) to OpenAI’s image model. Each image is billed to your OpenAI API account (a few cents).',
     transcript: 'To plan the edit, Editflow sends this project’s transcript text, your brief (audience, goal, notes) and any measured reference stats. Your video files are never sent.',
   }[p.kind || 'transcript'];
   return (
-    <Modal open title={`Send ${p.kind === 'frames' ? 'frames from this video' : p.kind === 'audio' ? 'this audio' : 'this project'} to ${p.name}?`} onClose={onCancel}>
+    <Modal open title={`Send ${p.kind === 'frames' ? 'frames from this video' : p.kind === 'audio' ? 'this audio' : p.kind === 'images' ? 'B-roll descriptions' : 'this project'} to ${p.name}?`} onClose={onCancel}>
       <div className="stack">
         <p className="text-2">{what}</p>
         <div className="notice warm">{p.dataUse}</div>

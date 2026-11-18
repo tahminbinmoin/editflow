@@ -200,6 +200,8 @@ input[type='range'] { accent-color: var(--accent); width: 100%; }
 .frame video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .frame .layer { position: absolute; inset: 0; pointer-events: none; }
 .frame .gfx-layer { position: absolute; inset: 0; pointer-events: none; }
+.frame .broll-still { position: absolute; inset: 0; overflow: hidden; }
+.frame .broll-still img { width: 100%; height: 100%; object-fit: cover; }
 .cap-preview { position: absolute; left: 8%; right: 8%; text-align: center; font-family: 'Inter Variable'; font-weight: 800; line-height: 1.2; }
 .cap-bold { color: #fff; text-shadow: 0 0 2px #000, 0 0 2px #000, 0 0 3px #000, 0 0 4px #000; }
 .cap-clean { color: #fff; font-weight: 700; text-shadow: 0 2px 6px rgba(0, 0, 0, .7); }
@@ -307,3 +309,21 @@ details.disclosure[open] > summary::before { transform: rotate(90deg); }
 @media (max-width: 480px) {
   .brand-name { display: none; }
 }
+
+/* Analyse video: look picker + B-roll strip */
+.looks { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.look { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 5px; border-radius: 9px; border: 1.5px solid var(--line); background: var(--bg-2); color: var(--text-2); cursor: pointer; }
+.look.on { border-color: var(--accent); color: var(--text); }
+.look .sw { height: 34px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 700; }
+.look .sw i { font-family: EFSerif, serif; font-weight: 400; margin-left: 1px; }
+.seg-toggle { display: inline-flex; gap: 4px; }
+.broll-strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+.broll-thumb { position: relative; flex: none; width: 54px; height: 72px; border-radius: 6px; overflow: hidden; background: var(--bg-2); border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--muted); }
+.broll-thumb.empty { border-style: dashed; }
+.broll-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.broll-thumb em { position: absolute; left: 3px; bottom: 2px; font-style: normal; font-size: 9px; color: #fff; text-shadow: 0 1px 2px #000; }
+.stock-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; max-height: 340px; overflow: auto; }
+.stock-grid button { position: relative; padding: 0; border: 1.5px solid transparent; border-radius: 6px; overflow: hidden; background: #000; aspect-ratio: 3 / 4; cursor: pointer; }
+.stock-grid button:hover { border-color: var(--accent); }
+.stock-grid img { width: 100%; height: 100%; object-fit: cover; }
+.stock-grid span { position: absolute; left: 3px; bottom: 2px; font-size: 9px; color: #fff; text-shadow: 0 1px 2px #000; }

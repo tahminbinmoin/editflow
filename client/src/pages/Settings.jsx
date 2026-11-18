@@ -118,6 +118,52 @@ function ProviderCard({ p, active, onChange, onActivate }) {
   );
 }
 
+function StockCard({ src, onChange }) {
+  const [key, setKey] = useState('');
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const save = async () => {
+    setBusy(true);
+    try {
+      onChange(await api(`/settings/ai/${src.id}`, { method: 'PUT', body: { key } }));
+      setKey('');
+      const r = await api(`/settings/ai/${src.id}/test`, { method: 'POST' });
+      setResult(r.lastTest);
+    } catch (e) {
+      toast(e.message, 'err');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="stack-sm">
+      <div className="spread">
+        <b>{src.name}</b>
+        <span className={`pill ${src.hasKey || src.serverKey ? 'ok' : ''}`}>{src.hasKey ? `Your key (${src.keyMasked})` : src.serverKey ? 'Provided by this app' : 'Not connected'}</span>
+      </div>
+      <p className="tiny muted">
+        {src.licence}{' '}
+        <a href={src.keyUrl} target="_blank" rel="noreferrer">
+          Get a free key <ExternalLink size={10} />
+        </a>
+      </p>
+      <div className="row">
+        <input className="input sm" type="password" autoComplete="off" placeholder={src.hasKey ? 'Paste to replace' : `${src.name} API key`} value={key} onChange={(e) => setKey(e.target.value)} aria-label={`${src.name} API key`} />
+        <button className="btn sm" onClick={save} disabled={!key || busy}>
+          {busy && <span className="spinner" />} Save & test
+        </button>
+        {src.hasKey && (
+          <button className="btn sm ghost danger" onClick={async () => onChange(await api(`/settings/ai/${src.id}/key`, { method: 'DELETE' }))}>
+            Remove
+          </button>
+        )}
+      </div>
+      {result && <div className={`notice ${result.ok ? 'ok' : 'err'} tiny`}>{result.message}</div>}
+    </div>
+  );
+}
+
 export default function Settings() {
   const [data, setData] = useState(null);
   const { refresh } = useAuth();
@@ -188,6 +234,30 @@ export default function Settings() {
         {data.providers.map((p) => (
           <ProviderCard key={p.id} p={p} active={active === p.id} onChange={(res) => setData({ ...data, ...res })} onActivate={activate} />
         ))}
+
+        <div className="card stack">
+          <div className="spread">
+            <h3 style={{ fontSize: 19 }}>B-roll sources</h3>
+            <span className="pill info">Used by “Analyse video”</span>
+          </div>
+          <p className="small text-2">
+            When ChatGPT or Claude plans B-roll, Editflow searches these free stock libraries, lets the AI pick the best match from the thumbnails, and saves the clip into your project. Your own B-roll clips are always tried first.
+          </p>
+          {(data.stock || []).map((src) => (
+            <StockCard key={src.id} src={src} onChange={(res) => setData({ ...data, ...res })} />
+          ))}
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={data.prefs.aiImages !== false}
+              onChange={async (e) => {
+                setData({ ...data, ...(await api('/settings/prefs', { method: 'PUT', body: { aiImages: e.target.checked } })) });
+                refresh();
+              }}
+            />{' '}
+            When no stock clip fits, generate an image with OpenAI (needs your OpenAI key; a few cents per image)
+          </label>
+        </div>
 
         <div className="card stack">
           <div className="spread">

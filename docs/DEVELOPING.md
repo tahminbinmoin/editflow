@@ -28,13 +28,21 @@ client/                    React app (Vite root)
   src/pages/               Landing, Auth, Dashboard, NewProject, Studio, Export, Settings
   public/sample/           sample media (committed); public/ffmpeg + public/fonts are copied at build
 api/index.js               Vercel function entry → server/api/handler.js
-server/api/handler.js      routes: /engine, /settings/ai*, /ai/first-cut, /ai/refine, /ai/reference, /ai/visuals, /transcribe/openai
-server/ai/providers.js     ChatGPT (OpenAI) + Claude (Anthropic) adapters: chat with images, OpenAI transcription
+server/api/handler.js      routes: /engine, /settings/ai*, /settings/prefs, /ai/first-cut, /ai/refine, /ai/reference,
+                           /ai/visuals (plan + stock search + picker), /broll/search, /broll/fetch, /broll/generate,
+                           /transcribe/openai
+server/ai/providers.js     ChatGPT (OpenAI) + Claude (Anthropic) adapters: chat with images (base64 or URL), OpenAI transcription
+server/media/stock.js      Pexels + Pixabay search/resolve/download (host allowlist), OpenAI image generation
 server/lib/secrets.js      AES-256-GCM with EDITFLOW_SECRET
 shared/                    pure modules used by browser, API and tests
   timeline.js              edit model + ops      plan.js       plan → timeline
   rules.js                 rule-based drafter    prompts.js    AI prompts (plan, refine, reference, visuals)
-  graphics.js              motion graphics: types, validation, overlap fitting, canvas drawing (preview + export)
+  gfx-core.js              canvas toolkit: fonts, looks (THEMES), easing, rich text with *emphasis*, frame guides
+  graphics.js              18 motion graphic types: validation, overlap fitting, drawing (preview + export)
+  captions-anim.js         animated caption styles (pill, pop, editorial, karaoke): word timing + drawing
+  layer.js                 the canvas layer (graphics + photo-card B-roll + captions), speaker push-down
+                           windows (panels, split B-roll), sound-effect events
+  sfx.js                   synthesised sound effects (Web Audio; live in preview, OfflineAudioContext in export)
   speech.js                WAV parsing, speech chunking at pauses (transcription timing)
   render-graph.js          export as ffmpeg commands    transcript.js  SRT/VTT/text parsing
   project.js               project document     probe.js      ffmpeg log parser     config.js
@@ -63,11 +71,14 @@ Assets read from a linked folder have `source: 'local', folderId, relPath, lastM
 ```js
 {
   format:   { aspect: '9:16' },
-  clips:    [{ id, assetId, in, out, volume, transitionIn, role, note }],  // in/out = SOURCE seconds
+  clips:    [{ id, assetId, in, out, volume, zoom, transitionIn, role, note }],  // in/out = SOURCE seconds; zoom 1–1.6 punch-in
   captions: { enabled, style, position, items: [{ id, assetId, start, end, text }] }, // SOURCE seconds → follow clips
   overlays: [{ id, template, text, sub, start, duration }],   // TIMELINE seconds
-  graphics: [{ id, type, start, duration, text, sub, items, x, y, color, position, reason }], // TIMELINE seconds
-  broll:    [{ id, start, duration, description, reason, assetId|null, srcIn }],
+  graphics: [{ id, type, start, duration, layout: 'overlay'|'panel'|'full', text, sub, body, items, values, labels,
+              x, y, color, position, variant, assetId, sfx, reason }],                    // TIMELINE seconds
+  style:    { theme: 'editorial'|'clean'|'bold', captionColor },
+  sfx:      { enabled, volume },
+  broll:    [{ id, start, duration, description, reason, assetId|null, srcIn, layout: 'full'|'split'|'card', caption, query }],
   music:    { assetId|null, mood, volume, duck, notes },
   audio:    { normalize, denoise, voiceVolume },
   sound:    [{ id, at, description }]                          // notes only
@@ -96,9 +107,29 @@ Add an entry to `PROVIDERS` in `server/ai/providers.js`:
 Settings, encryption, consent, logging and the "answered by" badge pick it up automatically. For tests, honour a `*_BASE_URL` env override and extend `test/mock-ai.js`.
 
 ### Add a motion graphic type
-1. Add an entry to `GRAPHIC_TYPES` and a draw function to `DRAW` in `shared/graphics.js`. Use Canvas 2D only, sized from `frameGuides()`, with animation based on the local time `t`.
-2. The preview (`Player.jsx`), the export (`client/src/lib/graphicsFrames.js` writes PNG frames, and `render-graph.js` overlays them), the editor (`EditPanel.jsx`, driven by `fields`) and the AI prompts (built from `GRAPHIC_TYPES`) pick it up automatically.
-3. Add it to the drawing test in `test/unit.test.js`.
+1. Add an entry to `GRAPHIC_TYPES` (label, group, fields, layouts) and a draw function to `DRAW` in `shared/graphics.js`:
+   - Canvas 2D only, sized from `frameGuides()`, with animation from the local time `t`;
+   - use `stage()` to support panel/full layouts, and the helpers in `gfx-core.js`.
+2. These pick it up automatically:
+   - the preview (`Player.jsx` → `drawLayer`);
+   - the export (`graphicsFrames.js` writes PNG frames, deduplicated; `render-graph.js` overlays them);
+   - the editor (`EditPanel.jsx`, driven by `fields`);
+   - the AI prompts (built from `GRAPHIC_TYPES`).
+3. Add a sample in `EditPanel.jsx` (`SAMPLE`) and a sound in `layer.js` (`SFX_FOR`).
+4. The "every graphic type draws" unit test covers it.
+
+### B-roll pipeline
+1. `/ai/visuals` plans the shots and returns slots: own clip (`assetId`), a stock `pick` chosen by the picker pass from Pexels/Pixabay thumbnails, or a `generate` prompt.
+2. The client (`useProject.analyzeVisuals`) calls `/broll/fetch` or `/broll/generate` per slot (3 at a time):
+   - the server re-resolves the clip by numeric id;
+   - downloads only from allowlisted hosts;
+   - stores the file under `<user>/<project>/<asset>/` and returns the asset.
+3. The assets are added to the project, tagged with the proposal id, and `discardPending` deletes unused ones.
+
+### Speaker push-down
+Top panels (`layout: 'panel'`) and split-screen B-roll move the main video down:
+- `layer.js` → `shiftWindows` and `videoShiftAt` (preview CSS transform);
+- `shiftExpr` (an ffmpeg overlay `y` expression with the same easing).
 
 ### Add an AI capability
 Prompt builder in `shared/prompts.js` (JSON only, segment IDs not timestamps) → route in `server/api/handler.js` using `runJsonTask` → validate output in the client before it touches the timeline → store as `pending` so the user previews it → a rule-based fallback in `shared/rules.js` or a clear message.

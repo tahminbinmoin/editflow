@@ -4,7 +4,8 @@ import { Wand2, Send, Check, X, RefreshCw, Eye, EyeOff, Sparkles, ScanEye } from
 import { RolePill, EngineBadge } from './ui.jsx';
 import { openWithLineOps } from '../lib/edits.js';
 import { formatTime } from '@shared/timeline.js';
-import { GRAPHIC_TYPES, GRAPHIC_COLORS } from '@shared/graphics.js';
+import { GRAPHIC_TYPES, GRAPHIC_COLORS, graphicLabel } from '@shared/graphics.js';
+import { THEMES } from '@shared/gfx-core.js';
 
 const EXAMPLES = ['Make the first three seconds faster', 'Add a stat graphic when a number is mentioned', 'Use yellow for all graphics', 'Make the music less intense', 'Use boxed captions', 'Cut it closer to 30 seconds'];
 
@@ -54,6 +55,19 @@ function Proposal({ project, act, preview, setPreview }) {
           ))}
         </div>
       )}
+      {p.broll?.length > 0 && (
+        <div className="broll-strip">
+          {p.broll.map((b, i) => {
+            const a = project.assets.find((x) => x.id === b.assetId);
+            return (
+              <div key={i} className={`broll-thumb ${b.assetId ? '' : 'empty'}`} title={`${formatTime(b.start)} · ${b.description}${a?.stock ? ` · ${a.stock.provider}` : a?.generated ? ' · AI image' : ''}`}>
+                {b.pick?.thumb || a?.stock ? <img src={b.pick?.thumb} alt="" /> : a?.generated ? <span>AI</span> : b.assetId ? <span>Yours</span> : <span>idea</span>}
+                <em>{formatTime(b.start).replace(/\.\d$/, '')}</em>
+              </div>
+            );
+          })}
+        </div>
+      )}
       {p.scenes?.length > 0 && (
         <details className="disclosure">
           <summary>What the AI saw ({p.scenes.length} scenes)</summary>
@@ -97,9 +111,13 @@ export default function AIPanel({ project, engine, act, busy, status, ops, previ
   const firstCut = async (forceRules) => {
     if (await act.firstCut(forceRules)) setPreview(true);
   };
+  const [look, setLook] = useState(tl.style?.theme || 'editorial');
+  const [amount, setAmount] = useState('lots');
+  const [aiImages, setAiImages] = useState(engine?.aiImages !== false);
   const analyze = async () => {
-    if (await act.analyzeVisuals()) setPreview(true);
+    if (await act.analyzeVisuals({ theme: look, brollAmount: amount, aiImages })) setPreview(true);
   };
+  const stock = engine?.stock || [];
   const graphics = tl.graphics || [];
   const refine = async (text) => {
     const r = (text ?? req).trim();
@@ -153,12 +171,52 @@ export default function AIPanel({ project, engine, act, busy, status, ops, previ
           </div>
           <p className="small text-2">
             {rules
-              ? 'Connect ChatGPT or Claude to have it look at your cut and suggest cutaways and animated graphics.'
-              : `${engine?.name} looks at still frames from your cut, your timed lines and your B-roll clips, then proposes cutaways and animated graphics (lower thirds, stats, keywords, checklists, callouts) timed to what’s said. You preview before applying.`}
+              ? 'Connect ChatGPT or Claude to have it watch your cut and build the visual layer.'
+              : `${engine?.name} watches frames of your cut and plans the visual layer: B-roll for what you’re saying (found in stock libraries, generated, or from your own clips), motion graphics, punch-in zooms and animated captions — then you preview it.`}
           </p>
+          {!rules && busy !== 'visuals' && (
+            <div className="stack-sm">
+              <div className="label">Look</div>
+              <div className="looks">
+                {Object.entries(THEMES).map(([k, th]) => (
+                  <button key={k} className={`look ${look === k ? 'on' : ''}`} onClick={() => setLook(k)} title={th.desc}>
+                    <span className="sw" style={{ background: th.paper, color: th.ink, fontFamily: th.head === 'serif' ? 'EFSerif, serif' : th.head === 'clean' ? 'EFInter, sans-serif' : 'EditflowGraphics, sans-serif' }}>
+                      Aa<i style={{ color: th.accent }}>a</i>
+                    </span>
+                    <span className="tiny">{th.label}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="tiny muted">{THEMES[look].desc}.</p>
+              <div className="row wrap">
+                <div className="seg-toggle">
+                  {[
+                    ['lots', 'Lots of B-roll'],
+                    ['some', 'Some B-roll'],
+                  ].map(([k, l]) => (
+                    <button key={k} className={`btn xs ${amount === k ? 'primary' : ''}`} onClick={() => setAmount(k)}>
+                      {l}
+                    </button>
+                  ))}
+                </div>
+                {engine?.images && (
+                  <label className="check tiny">
+                    <input type="checkbox" checked={aiImages} onChange={(e) => setAiImages(e.target.checked)} /> AI images when stock doesn’t fit
+                  </label>
+                )}
+              </div>
+              <p className="tiny muted">
+                {stock.length ? `Stock footage from ${stock.map((s) => s[0].toUpperCase() + s.slice(1)).join(' and ')}.` : (
+                  <>
+                    No stock library connected: <Link to="/app/settings">add a free Pexels or Pixabay key</Link> so B-roll gets real footage{engine?.images && aiImages ? '; until then missing shots become AI images.' : '.'}
+                  </>
+                )}
+              </p>
+            </div>
+          )}
           {busy === 'visuals' ? (
-            <div className="row small text-2">
-              <span className="spinner" /> {status || 'Analysing…'}
+            <div className="row small text-2" style={{ alignItems: 'flex-start' }}>
+              <span className="spinner" style={{ marginTop: 2 }} /> <span>{status || 'Analysing…'}</span>
             </div>
           ) : rules ? (
             <Link to="/app/settings" className="btn sm" style={{ alignSelf: 'flex-start' }}>
@@ -169,7 +227,7 @@ export default function AIPanel({ project, engine, act, busy, status, ops, previ
               <ScanEye size={16} /> {graphics.length || tl.broll.some((b) => b.assetId) ? 'Analyse again' : 'Analyse video'}
             </button>
           )}
-          {!rules && <p className="tiny muted">Sends about 6–20 small still frames (not the video file) after you confirm. Billed to your {engine?.name} API account.</p>}
+          {!rules && <p className="tiny muted">Sends 8–24 small still frames (not the video file) after you confirm. Usually 1–3 minutes. Billed to your {engine?.name} API account{engine?.images && aiImages ? ', plus a few cents per AI image on OpenAI' : ''}.</p>}
         </div>
       )}
 
@@ -238,7 +296,7 @@ export default function AIPanel({ project, engine, act, busy, status, ops, previ
               <div key={g.id} className="spread small">
                 <span>
                   <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, background: GRAPHIC_COLORS[g.color]?.hex, marginRight: 6 }} />
-                  <b>{GRAPHIC_TYPES[g.type]?.label}</b> <span className="text-2">{g.text || g.items?.[0] || ''}</span>
+                  <b>{GRAPHIC_TYPES[g.type]?.label}</b> <span className="text-2">{graphicLabel(g)}</span>
                   {g.reason && <div className="tiny muted">{g.reason}</div>}
                 </span>
                 <button className="btn xs ghost mono" onClick={() => onSeek(g.start + 0.6)}>

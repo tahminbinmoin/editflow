@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Scissors, Trash2, ZoomIn, Type, Clapperboard, Sparkles } from 'lucide-react';
 import { layout, timelineCaptions, formatTime } from '@shared/timeline.js';
-import { GRAPHIC_TYPES, GRAPHIC_COLORS } from '@shared/graphics.js';
+import { GRAPHIC_TYPES, GRAPHIC_COLORS, graphicLabel } from '@shared/graphics.js';
 
 const peakCache = new Map();
 function usePeaks(urls, assets) {
@@ -254,7 +254,7 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
                     onPointerDown={(e) => startDrag(e, 'broll', b.id, 'move')}
                     title={`${b.description}${b.reason ? ` — ${b.reason}` : ''}${b.assetId ? '' : ' (suggestion — no footage attached)'}`}
                   >
-                    {b.assetId ? '' : '+ '}
+                    {b.assetId ? (b.layout === 'split' ? '◧ ' : b.layout === 'card' ? '▣ ' : '') : '+ '}
                     {b.description}
                   </div>
                 );
@@ -266,7 +266,7 @@ export default function Timeline({ urls, timeline, assets, time, onSeek, selecti
                 const lane = gfxLanes.lane[g.id] % 3;
                 const n = Math.min(3, gfxLanes.count);
                 const laneStyle = n > 1 ? { top: 3 + lane * (32 / n), bottom: 'auto', height: 32 / n - 2, fontSize: n > 2 ? 9 : 10, padding: '0 5px' } : {};
-                const label = g.text || g.items?.[0] || GRAPHIC_TYPES[g.type]?.label;
+                const label = graphicLabel(g);
                 return (
                   <div
                     key={g.id}

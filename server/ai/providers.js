@@ -2,7 +2,7 @@
 // small interface, so the product never depends on one vendor:
 //   test(cfg, key) → { ok, models, message }
 //   chat(cfg, key, { system, user, json, images }) → { text, model, routedVia, usage }
-//     images: [{ label, data (base64 JPEG), mime }] — still frames for video analysis
+//     images: [{ label, data (base64 JPEG), mime } | { label, url }] — frames / stock thumbnails
 // OpenAI also transcribes speech (transcribe()). Keys are decrypted on the server only.
 //
 // Base URLs can be overridden for tests (OPENAI_BASE_URL / ANTHROPIC_BASE_URL).
@@ -63,10 +63,11 @@ export const PROVIDERS = {
     fields: [
       { key: 'model', label: 'Model', placeholder: 'gpt-6.2-sol', help: 'Used for planning and video analysis. Must accept images for video analysis (current GPT models do).' },
       { key: 'transcribeModel', label: 'Transcription model', placeholder: 'gpt-transcribe', help: 'Speech-to-text model for the Transcript tab.' },
+      { key: 'imageModel', label: 'Image model', placeholder: 'gpt-image-2', help: 'Makes AI B-roll images when stock footage doesn’t fit.' },
     ],
     secretLabel: 'OpenAI API key (sk-…)',
     vision: true,
-    defaults: () => ({ model: 'gpt-6.2-sol', transcribeModel: 'gpt-transcribe' }),
+    defaults: () => ({ model: 'gpt-6.2-sol', transcribeModel: 'gpt-transcribe', imageModel: 'gpt-image-2' }),
     async test(cfg, key) {
       const { json } = await http(`${OPENAI()}/models`, { headers: { authorization: `Bearer ${key}` }, timeout: 15000 });
       const ids = (json?.data || []).map((m) => m.id);
@@ -81,7 +82,7 @@ export const PROVIDERS = {
     },
     async chat(cfg, key, { system, user, json: wantJson, images = [] }) {
       const content = images.length
-        ? [{ type: 'text', text: user }, ...images.flatMap((im) => [{ type: 'text', text: im.label }, { type: 'image_url', image_url: { url: `data:${im.mime || 'image/jpeg'};base64,${im.data}`, detail: 'low' } }])]
+        ? [{ type: 'text', text: user }, ...images.flatMap((im) => [{ type: 'text', text: im.label }, { type: 'image_url', image_url: { url: im.url || `data:${im.mime || 'image/jpeg'};base64,${im.data}`, detail: 'low' } }])]
         : user;
       const { json } = await http(`${OPENAI()}/chat/completions`, {
         method: 'POST',
@@ -134,7 +135,7 @@ export const PROVIDERS = {
     },
     async chat(cfg, key, { system, user, images = [] }) {
       const content = images.length
-        ? [...images.flatMap((im) => [{ type: 'text', text: im.label }, { type: 'image', source: { type: 'base64', media_type: im.mime || 'image/jpeg', data: im.data } }]), { type: 'text', text: user }]
+        ? [...images.flatMap((im) => [{ type: 'text', text: im.label }, { type: 'image', source: im.url ? { type: 'url', url: im.url } : { type: 'base64', media_type: im.mime || 'image/jpeg', data: im.data } }]), { type: 'text', text: user }]
         : user;
       const { json } = await http(`${ANTHROPIC()}/messages`, {
         method: 'POST',

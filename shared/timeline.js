@@ -8,6 +8,8 @@
 //   caption.start / caption.end ... seconds in the SOURCE asset (captions follow their clip)
 //   overlay / broll / graphic start  seconds on the TIMELINE (intentionally placed)
 import { cleanGraphic, GRAPHIC_TYPES } from './graphics.js';
+import { THEMES } from './gfx-core.js';
+import { ANIMATED_CAPTION_STYLES } from './captions-anim.js';
 
 export const ASPECTS = {
   '9:16': { label: 'Vertical 9:16', hint: 'TikTok, Reels, Shorts', w: 9, h: 16 },
@@ -30,11 +32,14 @@ export const OVERLAY_TEMPLATES = {
 };
 
 export const CAPTION_STYLES = {
-  bold: 'Bold pop (white, heavy outline)',
-  clean: 'Clean (white, soft shadow)',
-  boxed: 'Boxed (text on dark box)',
-  accent: 'Accent (warm yellow)',
+  ...Object.fromEntries(Object.entries(ANIMATED_CAPTION_STYLES).map(([k, v]) => [k, v.label])),
+  bold: 'Static · bold (white, heavy outline)',
+  clean: 'Static · clean (white, soft shadow)',
+  boxed: 'Static · boxed (text on dark box)',
+  accent: 'Static · accent (warm yellow)',
 };
+
+export const BROLL_LAYOUTS = { full: 'Full screen', split: 'Split screen (top half)', card: 'Photo card (images)' };
 
 export const STORY_ROLES = ['hook', 'context', 'progression', 'payoff', 'cta'];
 
@@ -52,13 +57,15 @@ export function emptyTimeline(aspect = '9:16') {
     version: 1,
     format: { aspect },
     clips: [],
-    captions: { enabled: true, style: 'bold', position: 'lower', items: [] },
+    captions: { enabled: true, style: 'pill', position: 'lower', items: [], emphasis: [] },
     overlays: [],
     graphics: [],
     broll: [],
     music: { assetId: null, mood: '', volume: 0.22, duck: true, notes: '' },
     audio: { normalize: true, denoise: false, voiceVolume: 1 },
     sound: [],
+    style: { theme: 'editorial', captionColor: 'yellow' },
+    sfx: { enabled: true, volume: 0.5 },
   };
 }
 
@@ -70,6 +77,11 @@ export function normalizeTimeline(tl) {
   t.captions.items = Array.isArray(t.captions.items) ? t.captions.items : [];
   t.music = { ...base.music, ...(tl?.music || {}) };
   t.audio = { ...base.audio, ...(tl?.audio || {}) };
+  t.style = { ...base.style, ...(tl?.style || {}) };
+  t.sfx = { ...base.sfx, ...(tl?.sfx || {}) };
+  t.captions.emphasis = Array.isArray(t.captions.emphasis) ? t.captions.emphasis : [];
+  // Older projects: keep their static caption style unless they choose an animated one.
+  if (tl?.captions && !tl.captions.style) t.captions.style = 'bold';
   for (const k of ['clips', 'overlays', 'graphics', 'broll', 'sound']) t[k] = Array.isArray(t[k]) ? t[k] : [];
   return t;
 }
@@ -187,6 +199,7 @@ export function applyOp(tlIn, op, ctx = {}) {
           in: Number(op.in) || 0,
           out: Number(op.out) || (Number(op.in) || 0) + 3,
           volume: 1,
+          zoom: 1,
           transitionIn: 'cut',
           role: op.role || '',
           note: op.note || '',
@@ -199,8 +212,9 @@ export function applyOp(tlIn, op, ctx = {}) {
     }
     case 'updateClip': {
       const i = findIndex(tl.clips, op.clipId, 'Clip');
-      const patch = pick(op.patch, ['volume', 'transitionIn', 'role', 'note']);
+      const patch = pick(op.patch, ['volume', 'transitionIn', 'role', 'note', 'zoom']);
       if ('volume' in patch) patch.volume = Math.max(0, Math.min(2, Number(patch.volume)));
+      if ('zoom' in patch) patch.zoom = Math.round(Math.max(1, Math.min(1.6, Number(patch.zoom) || 1)) * 100) / 100;
       if ('transitionIn' in patch && !TRANSITIONS[patch.transitionIn]) throw new Error('Unknown transition');
       Object.assign(tl.clips[i], patch);
       break;
@@ -229,8 +243,9 @@ export function applyOp(tlIn, op, ctx = {}) {
       break;
     }
     case 'setCaptionStyle': {
-      const patch = pick(op.patch, ['enabled', 'style', 'position']);
+      const patch = pick(op.patch, ['enabled', 'style', 'position', 'emphasis']);
       if (patch.style && !CAPTION_STYLES[patch.style]) throw new Error('Unknown caption style');
+      if ('emphasis' in patch) patch.emphasis = (Array.isArray(patch.emphasis) ? patch.emphasis : []).map((w) => String(w).slice(0, 40)).filter(Boolean).slice(0, 60);
       Object.assign(tl.captions, patch);
       break;
     }
@@ -286,13 +301,19 @@ export function applyOp(tlIn, op, ctx = {}) {
         reason: String(b.reason || '').slice(0, 300),
         assetId: b.assetId || null,
         srcIn: Number(b.srcIn) || 0,
+        layout: BROLL_LAYOUTS[b.layout] ? b.layout : 'full',
+        caption: String(b.caption || '').slice(0, 80),
+        query: String(b.query || '').slice(0, 120),
       });
       tl.broll.sort((a, b2) => a.start - b2.start);
       break;
     }
     case 'updateBroll': {
       const i = findIndex(tl.broll, op.brollId, 'B-roll');
-      Object.assign(tl.broll[i], pick(op.patch, ['start', 'duration', 'description', 'reason', 'assetId', 'srcIn']));
+      const patch = pick(op.patch, ['start', 'duration', 'description', 'reason', 'assetId', 'srcIn', 'layout', 'caption', 'query']);
+      if ('layout' in patch && !BROLL_LAYOUTS[patch.layout]) throw new Error('Unknown B-roll layout');
+      Object.assign(tl.broll[i], patch);
+      tl.broll.sort((a, b2) => a.start - b2.start);
       break;
     }
     case 'deleteBroll': {
@@ -309,6 +330,19 @@ export function applyOp(tlIn, op, ctx = {}) {
       const patch = pick(op.patch, ['normalize', 'denoise', 'voiceVolume']);
       if ('voiceVolume' in patch) patch.voiceVolume = Math.max(0, Math.min(2, Number(patch.voiceVolume)));
       Object.assign(tl.audio, patch);
+      break;
+    }
+    case 'setStyle': {
+      const patch = pick(op.patch, ['theme', 'captionColor']);
+      if (patch.theme && !THEMES[patch.theme]) throw new Error('Unknown look');
+      Object.assign(tl.style, patch);
+      break;
+    }
+    case 'setSfx': {
+      const patch = pick(op.patch, ['enabled', 'volume']);
+      if ('volume' in patch) patch.volume = Math.max(0, Math.min(1, Number(patch.volume)));
+      if ('enabled' in patch) patch.enabled = !!patch.enabled;
+      Object.assign(tl.sfx, patch);
       break;
     }
     case 'setFormat': {
@@ -378,7 +412,9 @@ export function describeOp(op, tl) {
     case 'addClip':
       return `Add a clip (${fmt(op.in)}–${fmt(op.out)})`;
     case 'updateClip':
-      return `Change ${clipName(op.clipId)}: ${Object.entries(op.patch || {}).map(([k, v]) => `${k} = ${v}`).join(', ')}`;
+      return op.patch && Object.keys(op.patch).length === 1 && 'zoom' in op.patch
+        ? `${op.patch.zoom > 1 ? `Punch in ${Math.round((op.patch.zoom - 1) * 100)}% on` : 'Reset zoom on'} ${clipName(op.clipId)}`
+        : `Change ${clipName(op.clipId)}: ${Object.entries(op.patch || {}).map(([k, v]) => `${k} = ${v}`).join(', ')}`;
     case 'addCaption':
       return `Add caption "${op.text}"`;
     case 'updateCaption':
@@ -394,13 +430,13 @@ export function describeOp(op, tl) {
     case 'deleteOverlay':
       return 'Remove a text overlay';
     case 'addGraphic':
-      return `Add ${GRAPHIC_TYPES[op.graphic?.type]?.label.toLowerCase() || 'motion graphic'}${op.graphic?.text ? ` "${op.graphic.text}"` : ''} at ${fmt(op.graphic?.start)}`;
+      return `Add ${GRAPHIC_TYPES[op.graphic?.type]?.label.toLowerCase() || 'motion graphic'}${op.graphic?.text ? ` "${String(op.graphic.text).replace(/\*/g, '')}"` : ''} at ${fmt(op.graphic?.start)}`;
     case 'updateGraphic':
       return 'Edit a motion graphic';
     case 'deleteGraphic':
       return 'Remove a motion graphic';
     case 'addBroll':
-      return `Suggest B-roll at ${fmt(op.broll?.start)}: ${op.broll?.description}`;
+      return `${op.broll?.assetId ? 'Add' : 'Suggest'} B-roll at ${fmt(op.broll?.start)}: ${op.broll?.description}`;
     case 'updateBroll':
       return 'Edit a B-roll shot';
     case 'deleteBroll':
@@ -411,6 +447,10 @@ export function describeOp(op, tl) {
       return `Voice audio: ${Object.entries(op.patch || {}).map(([k, v]) => `${k} = ${v}`).join(', ')}`;
     case 'setFormat':
       return `Format → ${op.patch?.aspect}`;
+    case 'setStyle':
+      return op.patch?.theme ? `Look → ${THEMES[op.patch.theme]?.label || op.patch.theme}` : 'Change caption colour';
+    case 'setSfx':
+      return op.patch && 'enabled' in op.patch ? `Sound effects ${op.patch.enabled ? 'on' : 'off'}` : 'Sound effects volume';
     case 'setSound':
       return `Update ${op.items?.length || 0} sound design notes`;
     case 'replaceTimeline':
@@ -439,5 +479,8 @@ export function diffSummary(before, after) {
   if (JSON.stringify(na.music) !== JSON.stringify(nb.music)) lines.push('Music settings changed');
   if (JSON.stringify(na.audio) !== JSON.stringify(nb.audio)) lines.push('Voice audio settings changed');
   if (JSON.stringify(na.captions) !== JSON.stringify(nb.captions)) lines.push('Captions changed');
+  const zoomed = (t) => t.clips.filter((c) => (c.zoom || 1) > 1).length;
+  if (zoomed(na) !== zoomed(nb)) lines.push(`Punch-in zooms: ${zoomed(na)} → ${zoomed(nb)}`);
+  if (JSON.stringify(na.style) !== JSON.stringify(nb.style)) lines.push('Look changed');
   return lines;
 }

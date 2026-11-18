@@ -1,5 +1,6 @@
 import { layout, formatTime, OVERLAY_TEMPLATES, timelineCaptions } from './timeline.js';
 import { GRAPHIC_TYPES, GRAPHIC_COLORS } from './graphics.js';
+import { THEMES } from './gfx-core.js';
 
 const t = (s) => formatTime(s);
 
@@ -135,42 +136,54 @@ Return JSON: {"structure": "...", "pacing": "...", "shotRhythm": "...", "titleTr
 
 /**
  * Video analysis: the model sees still frames sampled across the CURRENT CUT (timeline times),
- * the timed transcript lines, and the creator's own B-roll library, and proposes B-roll and
- * motion graphics tied to what is said and shown.
+ * the timed transcript lines and the creator's own B-roll library, and plans B-roll (with stock
+ * search queries / image prompts), motion graphics, punch-in zooms and caption keywords.
+ * opts: { theme, brollAmount: 'lots'|'some', stock: bool, aiImages: bool, aspect }
  */
-export function visualsPrompt(project, frameTimes, libraryLabels = []) {
+export function visualsPrompt(project, frameTimes, libraryLabels = [], opts = {}) {
   const tl = project.timeline;
-  const { duration } = layout(tl);
+  const { duration, clips } = layout(tl);
   const caps = timelineCaptions(tl);
-  const lines = caps.length
-    ? caps.map((c) => `${t(c.start)}–${t(c.end)} ${c.text}`).join('\n')
-    : '(no captions on the cut yet)';
+  const lines = caps.length ? caps.map((c) => `${t(c.start)}–${t(c.end)} ${c.text}`).join('\n') : '(no captions on the cut yet)';
   const library = project.assets.filter((a) => a.kind === 'broll' && a.status === 'ready' && a.hasVideo !== false);
   const libText = libraryLabels.length
-    ? libraryLabels.map((l) => { const a = library[Number(String(l).slice(1)) - 1]; return `${l}: "${a?.name || 'clip'}" (${a?.duration ? a.duration.toFixed(1) : '?'}s long)`; }).join('\n')
-    : '(the creator has not added B-roll footage — suggest shots to film or license)';
-  const system = `You are the visual editor inside Editflow, a short-form video editor. You look at still frames from the creator's current cut and its timed transcript, then propose B-roll cutaways and animated motion graphics that make the video clearer and more engaging. Everything you return is previewed by the creator before it is applied.
+    ? libraryLabels.map((l) => { const a = library[Number(String(l).slice(1)) - 1]; return `${l}: "${a?.name || 'clip'}" (${a?.mediaType === 'image' ? 'image' : `${a?.duration ? a.duration.toFixed(1) : '?'}s video`})`; }).join('\n')
+    : '(none)';
+  const theme = THEMES[opts.theme] ? opts.theme : 'editorial';
+  const lots = opts.brollAmount !== 'some';
+  const sources = [opts.stock && 'stock video/photo search (Pexels, Pixabay)', opts.aiImages && 'AI image generation'].filter(Boolean).join(' and ') || 'nothing automatic: the creator films or uploads the shots';
+  const vertical = !['16:9'].includes(opts.aspect || tl.format.aspect);
+  const system = `You are the visual editor inside Editflow, a short-form video editor. You look at still frames from the creator's cut and its timed transcript, then plan the visual layer of a high-retention short: B-roll, motion graphics, punch-in zooms and caption keywords. Everything you return is previewed by the creator before it is applied.
 
-Rules:
-- Base every suggestion on what is actually said (timed lines) and actually visible (frames). Describe what you see honestly; never invent products, people, brands, numbers or claims that are not in the transcript or frames.
-- Times are seconds on the TIMELINE of the cut (0 to ${duration.toFixed(1)}). Frames are labelled with their timeline time.
-- B-roll: cover moments where the talking head can be replaced by something that SHOWS what is said (a product, a step, a place, a result). If a clip from the creator's B-roll library fits, set "footage" to its label (e.g. "B2") and "srcIn" to where in that clip to start. Otherwise set "footage": null and describe a shot the creator could film or license. 1.5–4 s each, not overlapping each other, and not in the first 1.5 s (keep the hook on the speaker's face) unless the hook is about an object.
-- Motion graphics: use sparingly (about one every 6–10 seconds at most) where they add information: a lowerThird when the speaker introduces themselves, a stat when a number is said, a keyword for the single key idea of a sentence, a list when steps or items are enumerated, a callout to point at an object visible in a frame (x, y = its position in the frame, 0–1), a chapter tag when the topic shifts, a progress bar only for tutorials or lists. Keep text short: keyword ≤ 3 words, list items ≤ 5 words. Time each graphic to start when the words are said. Never let two graphics in the same screen area overlap in time (a progress bar is the exception), and keep clear of the existing text overlays listed below.
-- Colours: pick from ${Object.keys(GRAPHIC_COLORS).join(', ')}; prefer one consistent colour that contrasts with the footage you see. Positions: top, center or bottom (captions sit at the bottom; avoid covering the speaker's face).
-- Return ONLY a JSON object.
+STYLE: "${THEMES[theme].label}" — ${THEMES[theme].desc}.
+${STYLE_GUIDE[theme]}
+
+B-ROLL (make a real effort — this is what makes the video feel produced):
+- ${lots ? 'Cover roughly 35–50% of the runtime with B-roll: a new visual every 3–6 seconds once the hook has landed.' : 'Add B-roll at the 3–6 strongest moments.'} Keep the first 1.5 s on the speaker unless the hook is about an object.
+- Each shot SHOWS what is being said at that moment (the noun, the action, the place, the result) — literal and concrete beats abstract. 1.5–4 s each, never overlapping each other.
+- layout: "full" (cutaway over the whole frame), "split" (shot in the top half, speaker in the bottom half — great for explaining), or "card" (a photo popping in as a polaroid — for people, products, books, screenshots).
+- Sources available: ${sources}. If a clip from the creator's library fits, set "footage" to its label (e.g. "B2"). Otherwise give "queries": 2 short stock-search phrases (2–4 plain English words, concrete and filmable, e.g. "barista pouring coffee", "city traffic night"; no brands, no text, no named people) and "kind": "video" or "photo"${opts.aiImages ? `, plus "imagePrompt": a vivid photographic prompt for an AI image used only if no stock fits (realistic photo, ${vertical ? 'vertical' : 'horizontal'} framing, no text or logos)` : ''}.
+
+MOTION GRAPHICS: about one every 4–7 seconds where they add information, timed to start when the words are said. Never let two graphics in the same screen area overlap in time, and never put a graphic on top of B-roll that covers the same area unless it adds a label. Keep text short (headline ≤ 9 words, keyword ≤ 3 words, list/columns items ≤ 4 words). Use *stars* around the one keyword of a headline. Colours: ${Object.keys(GRAPHIC_COLORS).join(', ')}.
+
+PUNCH-IN ZOOMS: pick 3–8 moments of emphasis (a punchline, a number, a strong claim) and zoom 1.12–1.3 on the speaker at that time; alternate so consecutive talking clips don't share the same framing.
+
+CAPTIONS: list the 1–3 words per sentence that deserve colour emphasis (numbers, outcomes, the surprising word).
+
+Base everything on what is actually said (timed lines) and visible (frames). Never invent facts, numbers, brands or people. Times are seconds on the TIMELINE of the cut (0 to ${duration.toFixed(1)}). Return ONLY a JSON object.
 
 Motion graphic types:
-${GRAPHIC_GUIDE}`;
+${GRAPHIC_GUIDE_FULL}`;
   const user = `CREATOR BRIEF
 ${briefBlock(project)}
 
-CUT: ${t(duration)} long, ${tl.clips.length} clips. ${frameTimes.length} frames attached at ${frameTimes.map((x) => x.toFixed(1)).join(', ')} s.
+CUT: ${t(duration)} long, ${clips.length} clips, format ${opts.aspect || tl.format.aspect}. ${frameTimes.length} frames attached at ${frameTimes.map((x) => x.toFixed(1)).join(', ')} s.
 
 TIMED LINES ON THE CUT (timeline start–end, text)
 ${lines}
 
-EXISTING B-ROLL: ${JSON.stringify(tl.broll.map(({ start, duration: d, description, assetId }) => ({ start, duration: d, description, hasFootage: !!assetId })))}  (slots without footage will be replaced by your suggestions)
-EXISTING MOTION GRAPHICS: ${JSON.stringify((tl.graphics || []).map(({ type, text, start, duration: d, position }) => ({ type, text, start, duration: d, position })))}  (don't duplicate or overlap these)
+EXISTING B-ROLL: ${JSON.stringify(tl.broll.map(({ start, duration: d, description, assetId }) => ({ start, duration: d, description, hasFootage: !!assetId })))}  (slots without footage will be replaced by your plan)
+EXISTING MOTION GRAPHICS: ${JSON.stringify((tl.graphics || []).map(({ type, text, start, duration: d, layout: l, position }) => ({ type, text, start, duration: d, layout: l, position })))}  (don't duplicate or overlap these)
 EXISTING TEXT OVERLAYS: ${JSON.stringify(tl.overlays.map(({ template, text, start, duration: d }) => ({ template, text, start, duration: d })))}  (title = center, kicker = top, lowerThird/cta = bottom)
 
 CREATOR'S B-ROLL LIBRARY (one frame of each is attached after the cut frames)
@@ -180,9 +193,36 @@ Return JSON with exactly this shape:
 {
   "summary": "2-3 sentences: what the video shows and what your visual plan adds",
   "scenes": [{"start": 0, "end": 3.5, "what": "what is on screen"}],
-  "broll": [{"start": 4.2, "duration": 2.5, "description": "what to show", "reason": "why it helps here", "footage": "B1 or null", "srcIn": 0}],
-  "graphics": [{"type": "${Object.keys(GRAPHIC_TYPES).join('|')}", "start": 6.0, "duration": 2.5, "text": "...", "sub": "...", "items": ["..."], "x": 0.5, "y": 0.5, "color": "accent", "position": "center", "reason": "why it helps here"}],
+  "broll": [{"start": 4.2, "duration": 2.5, "description": "what the shot shows", "reason": "why it helps here", "layout": "full|split|card", "footage": "B1 or null", "queries": ["...", "..."], "kind": "video|photo"${opts.aiImages ? ', "imagePrompt": "..."' : ''}, "caption": "optional 1-3 word handwritten label for cards"}],
+  "graphics": [{"type": "${Object.keys(GRAPHIC_TYPES).join('|')}", "start": 6.0, "duration": 2.5, "layout": "panel|full|overlay", "text": "...", "sub": "...", "body": "...", "items": ["..."], "values": [0, 0], "labels": ["", "", ""], "x": 0.5, "y": 0.5, "variant": "thought|speech", "color": "accent", "position": "top|center|bottom", "reason": "why it helps here"}],
+  "zooms": [{"at": 8.5, "zoom": 1.2}],
+  "captionEmphasis": ["word", "two words"],
   "notes": ["anything the creator should check or film"]
 }`;
+  return { system, user };
+}
+
+const STYLE_GUIDE = {
+  editorial: `Look like Neel Nafis's shorts: the signature move is a cream "panel" across the top third with a serif headline whose keyword is *italic and coloured* (headline, chart, pictogram, definition with layout "panel"), while the speaker sits below. Use panels for the key idea of each section (every 6–10 s), a "chart" whenever numbers change over time, a "pictogram" for "1 in N" facts, a "definition" when a term is introduced. B-roll often as "split". Captions are editorial (bold sans with serif italic keywords).`,
+  clean: `Look like Ali Abdaal's videos: an "iconRow" header with emoji tiles when listing apps/tools/books, "headline" with layout "full" for big statements (serif on paper with a marker highlight on the key phrase), "bubble" for inner thoughts, "columns" for tier lists, "photo" cards / B-roll "card" for people, books and products, "follow" at the end. Clean white UI, handwritten notes. Captions are small pills with the spoken word in bold.`,
+  bold: `Look like a high-energy promo reel: "keyword" pops on punchy words, "stat" counters for every number, "list" checklists for steps, "lowerThird" for names, "chapter" tags for sections, lots of full-screen B-roll with quick cuts, and a "follow" CTA at the end. Captions are big bold words popping in.`,
+};
+
+const GRAPHIC_GUIDE_FULL = Object.entries(GRAPHIC_TYPES)
+  .filter(([k]) => k !== 'photo') // photos come in as B-roll with layout "card"
+  .map(([k, g]) => `- ${k} [${g.group}; layouts: ${g.layouts.join('/')}]: ${g.desc}. Fields: ${g.fields.map((f) => ({ text: `text (${g.textLabel || 'text'})`, sub: `sub (${g.subLabel || 'second line'})`, items: `items (${g.itemsLabel || 'list'})`, values: k === 'chart' ? 'values [from, to]' : k === 'pictogram' ? 'values [total icons, highlighted]' : 'values', labels: 'labels [fromLabel, toLabel, unit prefix like "$"]', body: 'body (definition text)', point: 'x, y (0–1 position of the thing it points at / the speaker’s head)', variant: 'variant (thought|speech)', asset: 'assetId of an image' }[f] || f)).join(', ') || 'none'}`)
+  .join('\n');
+
+/** Second pass: the model looks at stock thumbnails and picks the best clip for each B-roll slot. */
+export function pickerPrompt(project, slots) {
+  const system = `You choose stock B-roll for a short video. For each slot you see the line being said, the shot the editor asked for, and numbered candidate thumbnails from stock libraries. Pick the candidate that most literally and attractively shows what is being said, matches the video's mood, and looks like real footage (avoid watermarks, text, obvious AI, mismatched settings or awkward faces). If none fits well, answer null — a wrong shot is worse than none. Return ONLY JSON.`;
+  const user = `CREATOR BRIEF
+${briefBlock(project)}
+
+SLOTS
+${slots.map((s, i) => `S${i + 1} at ${t(s.start)} for ${s.duration.toFixed(1)}s, layout ${s.layout}: want "${s.description}" — ${s.reason || ''}${s.line ? ` — said: "${s.line}"` : ''}. Candidates: ${s.candidates.map((c, j) => `C${j + 1} (${c.kind}${c.duration ? ` ${c.duration}s` : ''}, ${c.provider})`).join(', ')}`).join('\n')}
+
+Thumbnails are attached in order, labelled "S<slot> C<candidate>".
+Return JSON: {"picks": [{"slot": "S1", "choice": "C2 or null", "why": "short reason"}]}`;
   return { system, user };
 }

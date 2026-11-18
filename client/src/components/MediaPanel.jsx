@@ -9,7 +9,7 @@ import { MAX_UPLOAD_MB } from '@shared/config.js';
 
 const KINDS = [
   ['footage', 'Footage', 'video/*,audio/*'],
-  ['broll', 'B-roll', 'video/*'],
+  ['broll', 'B-roll', 'video/*,image/*'],
   ['music', 'Music', 'audio/*'],
   ['reference', 'Reference', 'video/*'],
 ];
@@ -40,7 +40,14 @@ function AssetRow({ project, a, urls, act, ops, readOnly }) {
           </div>
         ) : (
           <div className="tiny muted mono">
-            {formatTime(a.duration || 0)} {a.width ? `· ${a.width}×${a.height}` : ''} {a.size ? `· ${bytes(a.size)}` : ''}
+            {a.mediaType === 'image' ? 'Image' : formatTime(a.duration || 0)} {a.width ? `· ${a.width}×${a.height}` : ''} {a.size ? `· ${bytes(a.size)}` : ''}
+            {a.stock && (
+              <a className="pill info" style={{ marginLeft: 6 }} href={a.stock.pageUrl} target="_blank" rel="noreferrer" title={a.stock.licence}>
+                {a.stock.provider === 'pexels' ? 'Pexels' : 'Pixabay'}
+                {a.stock.author ? ` · ${a.stock.author}` : ''}
+              </a>
+            )}
+            {a.generated && <span className="pill" style={{ marginLeft: 6 }} title={a.generated.prompt}>AI image</span>}
             {a.sample && <span className="pill warm" style={{ marginLeft: 6 }}>sample</span>}
             {a.source === 'local' && (
               <span className={`pill ${urls[a.id]?.missing ? 'err' : 'info'}`} style={{ marginLeft: 6 }} title={a.relPath}>

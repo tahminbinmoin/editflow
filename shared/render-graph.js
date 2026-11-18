@@ -2,6 +2,9 @@
 // subtitle file for captions and text templates). Pure functions, no I/O: the browser runs
 // the command with ffmpeg.wasm, and tests run it with native ffmpeg.
 import { layout, timelineCaptions, normalizeTimeline, ASPECTS } from './timeline.js';
+import { isAnimatedStyle } from './captions-anim.js';
+import { shiftWindows, shiftExpr, SPLIT_FRAC } from './layer.js';
+import { rand } from './gfx-core.js';
 
 export const QUALITIES = {
   draft: { label: 'Draft (540p, fast)', short: 540, crf: 28 },
@@ -60,7 +63,8 @@ Style: cta,Poppins,${px(0.07)},&H00FFFFFF,&H00FFFFFF,${ACCENT},&H00000000,-1,0,0
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
   const lines = [];
-  if (tl.captions.enabled) {
+  // Animated caption styles are drawn on the canvas layer instead (see shared/layer.js).
+  if (tl.captions.enabled && !isAnimatedStyle(tl.captions.style)) {
     for (const c of timelineCaptions(tl)) lines.push(`Dialogue: 0,${assTime(c.start)},${assTime(c.end)},Cap,,0,0,0,,${assText(c.text)}`);
   }
   for (const o of tl.overlays) {
@@ -79,9 +83,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
  *
  * @param project { timeline, assets }
  * @param opts    { aspect, quality, outName, inputPath(asset), media: {[assetId]: {hasVideo, hasAudio}}, fontsDir, workDir,
- *                  graphics: [{ listName, start, end }] — motion graphics pre-rendered as PNG frames (ffconcat lists) }
+ *                  graphics: [{ listName, start, end }] — the canvas layer pre-rendered as PNG frames (ffconcat lists),
+ *                  sfxPath: WAV of the synthesised sound effects (or null) }
  */
-export function buildRenderPlan(project, { aspect, quality, outName, inputPath, media = {}, fontsDir = 'fonts', workDir = '', graphics = [] }) {
+export function buildRenderPlan(project, { aspect, quality, outName, inputPath, media = {}, fontsDir = 'fonts', workDir = '', graphics = [], sfxPath = null }) {
   const tl = normalizeTimeline({ ...project.timeline, format: { ...project.timeline.format, aspect } });
   const { clips, duration } = layout(tl);
   if (!clips.length) throw new Error('The timeline is empty — add at least one clip before exporting.');
@@ -90,6 +95,10 @@ export function buildRenderPlan(project, { aspect, quality, outName, inputPath, 
   const used = [];
   const use = (a) => (used.includes(a.id) ? null : used.push(a.id));
   const fit = `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H}`;
+  const even = (n) => Math.round(n / 2) * 2;
+  // Punch-in zoom: enlarge and crop around the upper-middle (where faces usually are).
+  const zoomed = (z) => (z > 1.001 ? `,scale=${even(W * z)}:${even(H * z)},crop=${W}:${H}:(iw-${W})/2:(ih-${H})*0.38` : '');
+  const isImage = (a) => a.mediaType === 'image';
   const AF = 'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo';
   const voiceVol = tl.audio.voiceVolume ?? 1;
   const segName = (i) => `${workDir}seg_${String(i).padStart(3, '0')}.mkv`;
@@ -107,7 +116,7 @@ export function buildRenderPlan(project, { aspect, quality, outName, inputPath, 
     if (next?.transitionIn === 'fade') fx.push(`fade=t=out:st=${f3(Math.max(0, d - 0.2))}:d=0.2`);
     const inputs = ['-ss', f3(c.in), '-t', f3(d), '-i', inputPath(a)];
     const graph = [];
-    if (a.hasVideo) graph.push(`[0:v]trim=duration=${f3(d)},setpts=PTS-STARTPTS,${fit},fps=30,format=yuv420p,setsar=1${fx.length ? ',' + fx.join(',') : ''}[v]`);
+    if (a.hasVideo) graph.push(`[0:v]trim=duration=${f3(d)},setpts=PTS-STARTPTS,${fit}${zoomed(c.zoom || 1)},fps=30,format=yuv420p,setsar=1${fx.length ? ',' + fx.join(',') : ''}[v]`);
     else graph.push(`color=c=0x141210:s=${W}x${H}:r=30:d=${f3(d)},format=yuv420p,setsar=1[v]`);
     const vol = (c.volume ?? 1) * voiceVol;
     if (a.hasAudio) graph.push(`[0:a]atrim=duration=${f3(d)},asetpts=PTS-STARTPTS,${AF},volume=${vol.toFixed(3)},afade=t=in:st=0:d=0.02,afade=t=out:st=${f3(Math.max(0, d - 0.03))}:d=0.03,apad=whole_dur=${f3(d)}[a]`);
@@ -125,16 +134,37 @@ export function buildRenderPlan(project, { aspect, quality, outName, inputPath, 
   const inputs = [['-f', 'concat', '-safe', '0', '-i', listName]];
   const graph = [];
   let vLabel = '0:v';
+  // Top panels and split-screen B-roll push the speaker down (same easing as the canvas panels).
+  shiftWindows(tl, W, H).forEach((w, k) => {
+    graph.push(`[${vLabel}]split=2[sb${k}][sm${k}]`);
+    graph.push(`[sb${k}][sm${k}]overlay=x=0:y='${shiftExpr(w)}':eval=frame:enable='between(t,${f3(w.start)},${f3(w.end)})'[vs${k}]`);
+    vLabel = `vs${k}`;
+  });
+  const S = even(H * SPLIT_FRAC);
   tl.broll
-    .filter((b) => b.assetId && assets[b.assetId]?.hasVideo && b.start < duration)
+    .filter((b) => b.assetId && assets[b.assetId]?.hasVideo && b.start < duration && b.layout !== 'card')
     .forEach((b, k) => {
       const d = Math.min(b.duration, duration - b.start);
       const a = assets[b.assetId];
       use(a);
       const idx = inputs.length;
-      inputs.push(['-ss', f3(b.srcIn || 0), '-t', f3(d), '-i', inputPath(a)]);
-      graph.push(`[${idx}:v]trim=duration=${f3(d)},setpts=PTS-STARTPTS+${f3(b.start)}/TB,${fit},fps=30,format=yuv420p,setsar=1[br${k}]`);
-      graph.push(`[${vLabel}][br${k}]overlay=eof_action=pass:enable='between(t,${f3(b.start)},${f3(b.start + d)})'[vb${k}]`);
+      const split = b.layout === 'split';
+      const bw = W;
+      const bh = split ? S : H;
+      if (isImage(a)) {
+        // Still image: a slow, smooth pan across a slightly larger copy (Ken Burns without jitter).
+        inputs.push(['-loop', '1', '-framerate', '30', '-t', f3(d), '-i', inputPath(a)]);
+        const pw = even(bw * 1.12);
+        const ph = even(bh * 1.12);
+        const dir = rand(b.id, 3) < 0.5 ? 1 : -1;
+        const px = dir > 0 ? `(iw-ow)*t/${f3(d)}` : `(iw-ow)*(1-t/${f3(d)})`;
+        graph.push(`[${idx}:v]scale=${pw}:${ph}:force_original_aspect_ratio=increase,crop=${pw}:${ph},crop=${bw}:${bh}:x='${px}':y='(ih-oh)/2',fps=30,format=yuv420p,setsar=1,setpts=PTS-STARTPTS+${f3(b.start)}/TB[br${k}]`);
+      } else {
+        inputs.push(['-ss', f3(b.srcIn || 0), '-t', f3(d), '-i', inputPath(a)]);
+        graph.push(`[${idx}:v]trim=duration=${f3(d)},setpts=PTS-STARTPTS+${f3(b.start)}/TB,scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},fps=30,format=yuv420p,setsar=1[br${k}]`);
+      }
+      const y = split ? `'(${shiftExpr({ start: b.start, end: b.start + d, px: S })})-${S}'` : '0';
+      graph.push(`[${vLabel}][br${k}]overlay=x=0:y=${y}:eval=frame:eof_action=pass:enable='between(t,${f3(b.start)},${f3(b.start + d)})'[vb${k}]`);
       vLabel = `vb${k}`;
     });
   // Motion graphics (transparent PNG frames drawn by shared/graphics.js) sit above B-roll, below captions.
@@ -166,6 +196,13 @@ export function buildRenderPlan(project, { aspect, quality, outName, inputPath, 
       graph.push('[vmain][musd]amix=inputs=2:duration=first:normalize=0[aout]');
     } else graph.push('[voice][mus]amix=inputs=2:duration=first:normalize=0[aout]');
   } else graph.push('[voice]anull[aout]');
+  if (sfxPath) {
+    const sx = inputs.length;
+    inputs.push(['-i', sfxPath]);
+    graph[graph.length - 1] = graph[graph.length - 1].replace(/\[aout\]$/, '[amain]');
+    graph.push(`[${sx}:a]${AF},atrim=0:${f3(duration)}[sfx]`);
+    graph.push('[amain][sfx]amix=inputs=2:duration=first:normalize=0[aout]');
+  }
 
   const q = QUALITIES[quality] || QUALITIES.standard;
   const final = [

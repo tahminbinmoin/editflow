@@ -58,3 +58,47 @@ test('sample project renders to a vertical MP4 of the right length and loudness,
   assert.ok(!(g3 > 200 && b3 > 200 && r3 < 80), 'graphic gone after its window');
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('export: punch-in zoom, top-panel push-down, split-screen image B-roll with pan, sound effects', { timeout: 180_000 }, () => {
+  const m = JSON.parse(fs.readFileSync(path.join(root, 'sample', 'manifest.json'), 'utf8'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'editflow-render2-'));
+  fs.mkdirSync(path.join(dir, 'fonts'));
+  fs.copyFileSync('assets/fonts/Poppins-Bold.ttf', path.join(dir, 'fonts', 'Poppins-Bold.ttf'));
+  const run = (args) => {
+    const r = spawnSync(ffmpeg, ['-hide_banner', '-y', ...args], { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr.slice(-800));
+  };
+  run(['-f', 'lavfi', '-i', 'color=c=0x00ff00:s=800x600', '-frames:v', '1', 'still.png']); // pure green "photo"
+  run(['-f', 'lavfi', '-i', 'sine=f=880:d=0.2', '-af', 'apad=whole_dur=6', '-ar', '48000', '-ac', '2', 'sfx.wav']);
+  const footage = { ...m.assets[0], id: 'a0' };
+  const still = { id: 'img', kind: 'broll', mediaType: 'image', name: 'still.png', duration: 0 };
+  const timeline = {
+    format: { aspect: '9:16' },
+    clips: [
+      { id: 'c1', assetId: 'a0', in: 0, out: 3, volume: 1, zoom: 1, transitionIn: 'cut' },
+      { id: 'c2', assetId: 'a0', in: 3, out: 6, volume: 1, zoom: 1.3, transitionIn: 'cut' },
+    ],
+    captions: { enabled: false, style: 'pill', items: [] },
+    overlays: [],
+    graphics: [{ id: 'g1', type: 'headline', layout: 'panel', start: 0.5, duration: 1.5, text: 'x' }],
+    broll: [{ id: 'b1', start: 3.5, duration: 2, assetId: 'img', layout: 'split', srcIn: 0 }],
+    music: {},
+    audio: { normalize: false },
+  };
+  const inputPath = (a) => (a.id === 'img' ? path.join(dir, 'still.png') : path.join(root, a.url));
+  const media = { a0: { hasVideo: true, hasAudio: true }, img: { hasVideo: true, hasAudio: false } };
+  const rp = buildRenderPlan({ timeline, assets: [footage, still] }, { aspect: '9:16', quality: 'draft', outName: 'out.mp4', inputPath, media, fontsDir: 'fonts', sfxPath: 'sfx.wav' });
+  assert.ok(rp.segments[1].args.join(' ').includes('scale=702:1248'), 'clip 2 is zoomed 1.3x');
+  assert.ok(rp.final.join(' ').includes("overlay=x=0:y='346*min("), 'the panel pushes the speaker down by the panel height');
+  fs.writeFileSync(path.join(dir, rp.assName), rp.ass);
+  fs.writeFileSync(path.join(dir, rp.listName), rp.list);
+  for (const sg of [...rp.segments.map((s) => s.args), rp.final]) run(sg);
+  const px = (t, x, y) => [...spawnSync(ffmpeg, ['-hide_banner', '-ss', String(t), '-i', path.join(dir, 'out.mp4'), '-frames:v', '1', '-vf', `crop=2:2:${x}:${y}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 1e6 }).stdout];
+  const [r1, g1, b1] = px(4.6, 270, 200); // top half during the split: the green still
+  assert.ok(g1 > 180 && r1 < 90 && b1 < 90, `split B-roll in the top half, got ${r1},${g1},${b1}`);
+  const [r2, g2, b2] = px(4.6, 270, 760); // bottom half: the speaker footage, not green
+  assert.ok(!(g2 > 180 && r2 < 90 && b2 < 90), 'speaker stays in the bottom half');
+  const vol = spawnSync(ffmpeg, ['-hide_banner', '-i', path.join(dir, 'out.mp4'), '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8' }).stderr;
+  assert.match(vol, /max_volume/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

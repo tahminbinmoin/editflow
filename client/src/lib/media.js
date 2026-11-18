@@ -317,7 +317,7 @@ export async function grabFrames(src, times, { maxSide = 448, quality = 0.72 } =
 /** Frames across the current cut (timeline times) plus one frame per B-roll library clip. */
 export async function sampleCut(project, urls, timeline, onStatus) {
   const { clips, duration } = layoutForFrames(timeline);
-  const n = Math.max(6, Math.min(20, Math.round(duration / 2.5)));
+  const n = Math.max(8, Math.min(24, Math.round(duration / 2)));
   const wanted = Array.from({ length: n }, (_, k) => +(((k + 0.5) * duration) / n).toFixed(2));
   const byAsset = new Map();
   for (const t of wanted) {

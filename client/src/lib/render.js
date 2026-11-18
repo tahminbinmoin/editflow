@@ -5,7 +5,7 @@ import { toBlobURL, fetchFile } from '@ffmpeg/util';
 import { buildRenderPlan, dimensions } from '@shared/render-graph.js';
 import { parseProbe } from '@shared/probe.js';
 import { assetBlob } from './media.js';
-import { writeGraphicFrames } from './graphicsFrames.js';
+import { writeGraphicFrames, loadLayerImages, sfxWav } from './graphicsFrames.js';
 import { normalizeTimeline, totalDuration } from '@shared/timeline.js';
 
 let ffPromise = null;
@@ -78,14 +78,15 @@ export async function renderVideo(project, urls, { aspect, quality }, onProgress
       throw new Error(`${a.name} could not be read by the video engine.`);
     }
   }
-  const tl = normalizeTimeline(project.timeline);
-  let graphics = [];
-  if (tl.graphics.length) {
-    const { W, H } = dimensions(aspect, quality);
-    onProgress?.({ step: 'Drawing motion graphics…', progress: 0 });
-    graphics = await writeGraphicFrames(ff, tl.graphics, totalDuration(tl), W, H, '/', (p) => onProgress?.({ step: `Drawing motion graphics (${Math.round(p * 100)}%)…`, progress: 0 }));
-  }
-  const plan = buildRenderPlan(project, { ...opts, media, graphics });
+  const tl = normalizeTimeline({ ...project.timeline, format: { ...project.timeline.format, aspect } });
+  const { W, H } = dimensions(aspect, quality);
+  const D = totalDuration(tl);
+  onProgress?.({ step: 'Drawing motion graphics and captions…', progress: 0 });
+  const images = await loadLayerImages(tl, async (id) => assetBlob(project.assets.find((a) => a.id === id), urls));
+  const graphics = await writeGraphicFrames(ff, tl, D, W, H, '/', { images }, (p) => onProgress?.({ step: `Drawing motion graphics and captions (${Math.round(p * 100)}%)…`, progress: 0 }));
+  const sfx = await sfxWav(tl, D).catch(() => null);
+  if (sfx) await ff.writeFile('/sfx.wav', sfx);
+  const plan = buildRenderPlan(project, { ...opts, media, graphics, sfxPath: sfx ? '/sfx.wav' : null });
   await ff.writeFile(plan.assName, plan.ass);
   await ff.writeFile(plan.listName, plan.list);
 
@@ -123,7 +124,7 @@ export async function renderVideo(project, urls, { aspect, quality }, onProgress
     const data = await ff.readFile('/out.mp4');
     return { blob: new Blob([data], { type: 'video/mp4' }), duration: plan.duration, W: plan.W, H: plan.H, seconds: Math.round((performance.now() - started) / 1000) };
   } finally {
-    for (const f of [...plan.segments.map((sg) => sg.out), '/out.mp4', plan.listName, plan.assName, ...graphics.flatMap((g) => g.files)]) await ff.deleteFile(f).catch(() => {});
+    for (const f of [...plan.segments.map((sg) => sg.out), '/out.mp4', plan.listName, plan.assName, '/sfx.wav', ...graphics.flatMap((g) => g.files)]) await ff.deleteFile(f).catch(() => {});
     await ff.unmount('/in').catch(() => {});
   }
 }

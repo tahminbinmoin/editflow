@@ -12,6 +12,7 @@ import { applyOps, describeOp, diffSummary, uid, normalizeTimeline } from '@shar
 import { cleanPlan, planToTimeline } from '@shared/plan.js';
 import { rulePlan, ruleRefine } from '@shared/rules.js';
 import { parseTranscriptFile, setAssetSegments } from '@shared/transcript.js';
+import { mapLimit } from '@shared/speech.js';
 import { SETTINGS_KEYS } from '@shared/project.js';
 import { ASPECTS } from '@shared/timeline.js';
 
@@ -221,44 +222,105 @@ export function useProject(id) {
           });
           return true;
         }),
-      /** Send still frames of the cut to ChatGPT/Claude → proposal of B-roll + motion graphics. */
-      analyzeVisuals: () =>
+      /**
+       * "Analyse video": frames of the cut → ChatGPT/Claude plans B-roll, motion graphics, zooms
+       * and caption keywords → stock footage is searched and picked → the picks are downloaded
+       * into this project (and AI images generated) → one proposal to preview.
+       * options: { theme, brollAmount: 'lots'|'some', aiImages }
+       */
+      analyzeVisuals: (options = {}) =>
         run('visuals', async () => {
           const p = ref.current;
           if (!engine || engine.id === 'rules') throw new Error('Video analysis needs ChatGPT or Claude. Connect one in AI settings.');
           if (!p.timeline.clips.length) throw new Error('Make a first cut before analysing the video.');
           needsConsent(`${engine.id}:frames`, engine.name, engine.dataUse, 'frames');
+          const wantImages = options.aiImages !== false && engine.images;
+          if (wantImages) needsConsent('openai:images', 'OpenAI (images)', 'OpenAI states that API data is not used to train its models by default.', 'images');
+          const proposalId = uid('prop');
+          const added = [];
           try {
             setStatus('Reading frames from your cut…');
             const { frames, library } = await sampleCut(p, urls, normalizeTimeline(p.timeline), setStatus);
             if (frames.length < 2) throw new Error('Could not read frames from the footage. Check that it plays in the preview (and that its folder is connected).');
-            setStatus(`${engine.name} is looking at ${frames.length} frames${library.length ? ` and ${library.length} B-roll clips` : ''}…`);
-            const { meta, ...out } = await api('/ai/visuals', { method: 'POST', body: { projectId: p.id, frames, library } });
-            const res = applyOps(p.timeline, out.ops || [], { assets: p.assets });
-            const notes = [...(out.notes || []), ...res.errors.map((e) => `Skipped one step: ${e.error}`)];
+            setStatus(`${engine.name} is watching ${frames.length} frames${library.length ? ` and ${library.length} of your B-roll clips` : ''}, then picking stock footage…`);
+            const { meta, ...out } = await api('/ai/visuals', { method: 'POST', body: { projectId: p.id, frames, library, options: { ...options, aiImages: wantImages } } });
+            const notes = [...(out.notes || [])];
+            // Download the picked stock clips and generate images, a few at a time.
+            const slots = out.broll || [];
+            const jobs = slots.filter((b) => !b.assetId && (b.pick || b.generate));
+            let done = 0;
+            await mapLimit(jobs, 3, async (b) => {
+              setStatus(`Adding B-roll ${++done} of ${jobs.length}: ${b.description.slice(0, 50)}…`);
+              try {
+                const { asset } = b.pick
+                  ? await api('/broll/fetch', { method: 'POST', body: { projectId: p.id, provider: b.pick.provider, id: b.pick.id, kind: b.pick.kind } })
+                  : await api('/broll/generate', { method: 'POST', body: { projectId: p.id, prompt: b.generate, layout: b.layout } });
+                b.assetId = asset.id;
+                if (b.pick?.kind === 'video' && asset.duration > b.duration + 1) b.srcIn = Math.min(0.6, asset.duration - b.duration);
+                if (asset.mediaType !== 'image' && b.layout === 'card') b.layout = 'split';
+                added.push({ ...asset, proposalId });
+              } catch (e) {
+                notes.push(`Couldn’t add “${b.description}”: ${e.message}`);
+              }
+            });
+            if (added.length) await mutate((d) => d.assets.push(...added));
+            const ops = [
+              ...(out.replaceBroll || []).map((brollId) => ({ type: 'deleteBroll', brollId })),
+              ...slots.map((b) => ({ type: 'addBroll', broll: { start: b.start, duration: b.duration, description: b.description, reason: b.reason, assetId: b.assetId || null, srcIn: b.srcIn || 0, layout: b.assetId && b.layout === 'card' && !added.find((a) => a.id === b.assetId && a.mediaType === 'image') && !ref.current.assets.find((a) => a.id === b.assetId && a.mediaType === 'image') ? 'split' : b.layout, caption: b.caption, query: b.query } })),
+              ...(out.ops || []),
+            ];
+            const res = applyOps(ref.current.timeline, ops, { assets: ref.current.assets });
+            notes.push(...res.errors.map((e) => `Skipped one step: ${e.error}`));
             const now = new Date().toISOString();
-            if (!res.applied.length) {
-              await mutate((d) => d.chat.push({ role: 'assistant', text: out.summary || 'No visual changes proposed.', notes, at: now, meta }));
-              throw new Error(`${engine.name} didn’t propose any B-roll or graphics for this cut.`);
-            }
-            const steps = res.applied.filter((o) => o.type !== 'deleteBroll').map((o) => describeOp(o, p.timeline));
-            const removed = res.applied.filter((o) => o.type === 'deleteBroll').length;
-            if (removed) steps.push(`Replace ${removed} earlier B-roll idea${removed === 1 ? '' : 's'} without footage`);
-            const pending = { id: uid('prop'), kind: 'visuals', summary: out.summary, scenes: out.scenes || [], steps, ops: res.applied, notes, timeline: res.timeline, changes: diffSummary(p.timeline, res.timeline), meta, createdAt: now };
+            if (!res.applied.length) throw new Error(`${engine.name} didn’t propose any visual changes for this cut.`);
+            const withFootage = slots.filter((b) => b.assetId).length;
+            const steps = [];
+            if (slots.length) steps.push(`B-roll: ${withFootage} of ${slots.length} shots with footage (${added.filter((a) => a.stock).length} stock, ${added.filter((a) => a.generated).length} AI images, ${slots.filter((b) => b.assetId && !added.find((a) => a.id === b.assetId)).length} yours)`);
+            steps.push(...res.applied.filter((o) => !['deleteBroll', 'addBroll', 'setStyle', 'setCaptionStyle'].includes(o.type)).map((o) => describeOp(o, ref.current.timeline)));
+            const pending = { id: proposalId, kind: 'visuals', summary: out.summary, scenes: out.scenes || [], broll: slots, steps, ops: res.applied, notes, timeline: res.timeline, changes: diffSummary(ref.current.timeline, res.timeline), meta, newAssetIds: added.map((a) => a.id), createdAt: now };
             await mutate((d) => {
               d.pending = pending;
-              d.chat.push({ role: 'assistant', text: pending.summary, notes, at: now, meta, proposalId: pending.id });
+              d.chat.push({ role: 'assistant', text: pending.summary, notes, at: now, meta, proposalId });
             });
             return true;
+          } catch (e) {
+            if (added.length) await act.dropAssets(added.map((a) => a.id)).catch(() => {});
+            throw e;
           } finally {
             setStatus(null);
           }
+        }),
+      /** Remove assets (and their files) that nothing uses, e.g. B-roll from a discarded proposal. */
+      dropAssets: async (ids) => {
+        const user = await currentUser();
+        await mutate((d) => (d.assets = d.assets.filter((a) => !ids.includes(a.id))));
+        for (const aid of ids) store.removeStoragePrefix(`${user.id}/${id}/${aid}`).catch(() => {});
+      },
+      /** Search stock footage for the B-roll editor. */
+      searchStock: (query, kind, layout) => api('/broll/search', { method: 'POST', body: { projectId: id, query, kind, layout } }),
+      /** Download a stock clip (or generate an image) into the project and attach it to a B-roll slot. */
+      attachStock: (brollId, candidate, layout) =>
+        run('broll', async () => {
+          const { asset } = await api('/broll/fetch', { method: 'POST', body: { projectId: id, provider: candidate.provider, id: candidate.id, kind: candidate.kind } });
+          await mutate((d) => d.assets.push(asset));
+          const b = ref.current.timeline.broll.find((x) => x.id === brollId);
+          await ops([{ type: 'updateBroll', brollId, patch: { assetId: asset.id, srcIn: asset.duration > (b?.duration || 2) + 1 ? 0.5 : 0, ...(asset.mediaType !== 'image' && layout === 'card' ? { layout: 'split' } : {}) } }], 'Attach stock footage');
+          return asset;
+        }),
+      generateBroll: (brollId, prompt) =>
+        run('broll', async () => {
+          needsConsent('openai:images', 'OpenAI (images)', 'OpenAI states that API data is not used to train its models by default.', 'images');
+          const b = ref.current.timeline.broll.find((x) => x.id === brollId);
+          const { asset } = await api('/broll/generate', { method: 'POST', body: { projectId: id, prompt, layout: b?.layout } });
+          await mutate((d) => d.assets.push(asset));
+          await ops([{ type: 'updateBroll', brollId, patch: { assetId: asset.id, srcIn: 0 } }], 'Attach AI image');
+          return asset;
         }),
       applyPending: () =>
         run('apply', async () => {
           const pend = ref.current.pending;
           if (!pend) return;
-          const label = pend.kind === 'firstCut' ? `${pend.meta.engine === 'rules' ? 'Rule-based' : 'AI'} first cut` : pend.kind === 'visuals' ? 'AI: B-roll and motion graphics' : `AI: ${pend.request}`.slice(0, 90);
+          const label = pend.kind === 'firstCut' ? `${pend.meta.engine === 'rules' ? 'Rule-based' : 'AI'} first cut` : pend.kind === 'visuals' ? 'AI: B-roll, motion graphics and zooms' : `AI: ${pend.request}`.slice(0, 90);
           await commit(normalizeTimeline(pend.timeline), label, pend.meta.engine === 'rules' ? 'rules' : 'ai', (p) => {
             if (pend.kind === 'firstCut') p.plan = pend.plan;
             const m = p.chat.find((c) => c.proposalId === pend.id);
@@ -267,13 +329,18 @@ export function useProject(id) {
           });
         }),
       discardPending: () =>
-        run('discard', () =>
-          mutate((p) => {
+        run('discard', async () => {
+          const drop = ref.current.pending?.newAssetIds || [];
+          await mutate((p) => {
             const m = p.chat.find((c) => c.proposalId === p.pending?.id);
             if (m) m.outcome = 'discarded';
             p.pending = null;
-          }),
-        ),
+          });
+          // B-roll downloaded for this proposal and not used anywhere else goes too.
+          const tl = normalizeTimeline(ref.current.timeline);
+          const unused = drop.filter((aid) => !tl.broll.some((b) => b.assetId === aid) && !tl.graphics.some((g) => g.assetId === aid));
+          if (unused.length) await act.dropAssets(unused);
+        }),
       reference: () =>
         run('reference', async () => {
           const p = ref.current;
@@ -315,6 +382,22 @@ export function useProject(id) {
         const localFields = local ? { source: 'local', folderId: local.folderId, relPath: local.relPath, lastModified: file.lastModified } : {};
         await mutate((p) => p.assets.push({ id: aid, kind, name: file.name.slice(0, 160), mime: file.type, size: file.size, ...localFields, status: 'processing', step: 'Reading file', progress: 0.02, createdAt: new Date().toISOString() }));
         try {
+          if (/^image\//.test(file.type) || /\.(jpe?g|png|webp|gif)$/i.test(file.name)) {
+            // A still image (B-roll photo): no audio, rendered with a slow pan or as a photo card.
+            const bmp = await createImageBitmap(file);
+            const fields = { mediaType: 'image', width: bmp.width, height: bmp.height, duration: 0, hasVideo: true, hasAudio: false };
+            await patch({ ...fields, step: local ? 'Saving preview' : 'Uploading', progress: 0.2 });
+            const extra = local ? {} : { path: await uploadToStorage(`${base}/original${ext(file.name)}`, file, null, file.type || 'image/jpeg') };
+            const c = document.createElement('canvas');
+            const sc = Math.min(1, 480 / bmp.width);
+            c.width = Math.round(bmp.width * sc);
+            c.height = Math.round(bmp.height * sc);
+            c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+            const thumb = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.8));
+            extra.thumbPath = await uploadToStorage(`${base}/thumb.jpg`, thumb, null, 'image/jpeg');
+            await mutate((p) => Object.assign(p.assets.find((x) => x.id === aid), { ...fields, ...extra, thumb: true, status: 'ready', step: null, progress: 1, error: null }));
+            return aid;
+          }
           const info = await probeFile(file);
           await patch({ ...info, step: 'Reading audio', progress: 0.08 });
           // Decoding audio loads the whole file into memory; skip it for very large files.

@@ -54,7 +54,7 @@ export function FolderFileList({ list, onChange, already = [] }) {
                 checked={on}
                 onChange={(e) => {
                   const next = { ...sel };
-                  if (e.target.checked) next[f.relPath] = isAudio ? 'music' : 'footage';
+                  if (e.target.checked) next[f.relPath] = isAudio ? 'music' : f.kind === 'image' ? 'broll' : 'footage';
                   else delete next[f.relPath];
                   setSel(next);
                 }}
@@ -77,7 +77,7 @@ export function FolderFileList({ list, onChange, already = [] }) {
               </div>
               {on && (
                 <select className="select sm" style={{ width: 120 }} value={sel[f.relPath]} onClick={(e) => e.preventDefault()} onChange={(e) => setSel({ ...sel, [f.relPath]: e.target.value })} aria-label={`Use ${f.name} as`}>
-                  {KIND_OPTIONS.map(([k, l]) => (
+                  {KIND_OPTIONS.filter(([k]) => f.kind !== 'image' || k === 'broll').map(([k, l]) => (
                     <option key={k} value={k}>
                       {l}
                     </option>

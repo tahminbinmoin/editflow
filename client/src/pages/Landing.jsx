@@ -148,8 +148,8 @@ export default function Landing() {
                 <li>Pause detection and measured pacing of your reference video (cuts per minute, shot length)</li>
                 <li>Work straight from a folder on your computer (e.g. Downloads): any file size, nothing uploaded, exports saved back into the folder (Chrome and Edge remember it)</li>
                 <li>Undo, redo and a full edit history; AI changes are previewed before they apply</li>
-                <li>ChatGPT or Claude (your own API key) plans the story, then looks at frames of your video to add B-roll and motion graphics; or use a transparent rule-based draft with no AI at all</li>
-                <li>Animated motion graphics: lower thirds, keyword pops, stat counters, checklists, callout arrows, progress bars and chapter tags, exported exactly as previewed</li>
+                <li>ChatGPT or Claude (your own API key) plans the story, then watches frames of your video and builds the visual layer: B-roll it actually finds (Pexels/Pixabay stock picked by a second look, AI images, or your clips), motion graphics, punch-in zooms and caption keywords</li>
+                <li>18 animated motion graphics in three looks (editorial panels, clean cards, bold promo) and word-by-word animated captions, including Bangla, exported exactly as previewed with matching sound effects</li>
               </ul>
             </div>
             <div>

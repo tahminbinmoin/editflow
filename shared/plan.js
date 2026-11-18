@@ -103,6 +103,8 @@ export function planToTimeline(plan, segments, { aspect = '9:16', previous = nul
     tl.music.assetId = previous.music?.assetId || null;
     tl.music.volume = previous.music?.volume ?? tl.music.volume;
     tl.captions.style = previous.captions?.style || tl.captions.style;
+    if (previous.style) tl.style = { ...tl.style, ...previous.style };
+    if (previous.sfx) tl.sfx = { ...tl.sfx, ...previous.sfx };
   }
 
   // Clips: merge runs of adjacent segments from the same asset into one clip.

@@ -101,11 +101,16 @@ Until then, each user adds an API key from platform.openai.com or console.anthro
 - still frames, for video analysis;
 - the audio track, for transcription.
 
-**Video analysis.** "Analyse video" in the AI panel works like this:
-1. The browser samples 6–20 small still frames across the current cut, plus one frame of each B-roll clip.
-2. The model sees those frames with the timed caption lines and the brief.
-3. It returns B-roll cutaways (matched to the user's own B-roll clips where they fit) and motion graphics timed to what's said.
-4. The server validates everything and fits the graphics around each other so they don't overlap. The user previews the result before applying it.
+**Video analysis ("Analyse video").** Pick a look (Editorial, Clean or Bold) and how much B-roll you want, then:
+1. The browser samples 8–24 small still frames across the cut, plus one frame of each of your B-roll clips.
+2. ChatGPT or Claude plans the visual layer from the frames, the timed lines and the brief:
+   - B-roll shots, each with a layout (full screen, split screen or photo card) and stock search phrases;
+   - motion graphics, punch-in zooms and caption keywords.
+3. Editflow finds footage for every shot your own clips don't cover. It searches Pexels and Pixabay, then the model takes a **second look** at the candidate thumbnails and picks the best match, or none.
+4. Picked clips are downloaded into the project's Storage folder with their credit. Shots with no good match become AI images (OpenAI `gpt-image-2`) if that option is on.
+5. Everything arrives as one proposal to preview. Discarding it deletes the downloaded files.
+
+**B-roll sources.** Add a free [Pexels](https://www.pexels.com/api/new/) and/or [Pixabay](https://pixabay.com/api/docs/) key in **AI settings → B-roll sources**. You can also set `PEXELS_API_KEY` / `PIXABAY_API_KEY` on Vercel to provide them for every user. Licences: Pexels (free, credit appreciated) and the Pixabay Content License. Every stock asset keeps its source page and author, shown in the Media tab and the B-roll editor. In the B-roll editor you can also search stock yourself, or generate an AI image for a slot.
 
 **Transcription.** The browser makes a 16 kHz mono WAV and uploads it to Storage. The API then:
 1. splits it at pauses (`shared/speech.js`);
@@ -120,8 +125,19 @@ Clips can be up to about 25 minutes.
 - Accounts (email/password, guest demo through anonymous sign-in, upgrading a guest to a full account), private projects per user, a sample project
 - Uploads with progress straight to Supabase Storage, or working straight from a folder on the user's computer (any file size, exports saved back into the folder); in-browser reading of duration and resolution, waveforms, pause detection, thumbnails, and reference-video pacing (frame sampling)
 - Story planning (ChatGPT, Claude or rule-based) as a structured plan: hook options, beats, clip order, captions, B-roll tied to lines with reasons, music mood, sound-design notes, audio clean-up, a review checklist
-- Video analysis with ChatGPT or Claude: B-roll cutaways (using your own B-roll clips where they fit) and motion graphics from still frames of the cut
-- Motion graphics: lower thirds, keyword pops, stat counters, checklists, callout arrows, progress bars and chapter tags. They're animated, editable on their own timeline track, and drawn by the same code in the preview and the export.
+- Video analysis with ChatGPT or Claude (see above): B-roll that actually gets added (stock, AI images or your clips), motion graphics, punch-in zooms and caption keywords, in one of three looks modelled on reference creators:
+  - **Editorial:** Neel Nafis-style cream panels with serif headlines and italic coloured keywords.
+  - **Clean:** Ali Abdaal-style white cards, statement cards and handwritten notes.
+  - **Bold:** promo-reel style.
+- 18 motion graphics:
+  - **Editorial:** headline panel, stat + self-drawing chart, pictogram, definition card.
+  - **Clean:** icon header, polaroid photo card, thought/speech bubble, tier list, versus, emoji pop, follow button.
+  - **Bold:** keyword pop, stat counter, lower third, checklist, chapter tag, callout arrow, progress bar.
+  - Top panels push the speaker down and full-screen cards cover the frame.
+  - All of them are drawn by one Canvas 2D implementation in the preview and the export.
+- Animated captions (pill, pop, editorial, karaoke): word by word, with keyword colour. Bangla works, thanks to Hind Siliguri and canvas rendering.
+- B-roll layouts: full screen, split screen (speaker below), photo card. Images get a slow pan.
+- Punch-in zooms per clip, and synthesised sound effects (pop, whoosh, ding, click) on graphics and B-roll.
 - Transcription with OpenAI (timed lines split at pauses), or import .srt/.vtt
 - Edits stored as JSON ops with undo/redo and history (`project_history` table); AI proposals previewed before they apply
 - Manual editing: trim, split, reorder, delete, volume, transitions, caption styles and text, 4 text templates, 7 motion graphics, B-roll slots, music with ducking, loudness normalisation, noise reduction, text-based cutting
@@ -134,6 +150,8 @@ Clips can be up to about 25 minutes.
 - Sample project: placeholder footage, a synthetic speech tone and a written transcript, all labelled.
 - Reframing is a center crop. Reference title style, transitions and music genre aren't measured.
 - Video analysis sees still frames, not motion or sound. Graphic placement (like a callout's target) is the model's estimate from those frames, so check it in the preview.
+- Stock search needs a Pexels or Pixabay key. Pixabay asks API users to cache searches for 24 hours; Editflow doesn't cache yet, so keep volumes low or add a cache before scaling.
+- Motion graphics and animated captions are rendered as PNG frames in the browser before the ffmpeg pass. Long videos at 1080p take noticeably longer to export than Draft.
 
 ## Developing
 
