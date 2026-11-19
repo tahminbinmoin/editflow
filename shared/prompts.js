@@ -1,20 +1,34 @@
 import { layout, formatTime, OVERLAY_TEMPLATES, timelineCaptions } from './timeline.js';
 import { GRAPHIC_TYPES, GRAPHIC_COLORS } from './graphics.js';
 import { THEMES } from './gfx-core.js';
+import { wordIndex, markedText } from './cleancut.js';
+import { EDIT_TYPES } from './styles.js';
 
 const t = (s) => formatTime(s);
 
 function transcriptBlock(project) {
   const names = Object.fromEntries(project.assets.map((a, i) => [a.id, `A${i + 1}`]));
-  return project.transcript.segments.map((s) => `${s.id} [${names[s.assetId] || '?'} ${t(s.start)}–${t(s.end)}] ${s.text}`).join('\n');
+  const idx = wordIndex(project.transcript, project.assets);
+  const segById = Object.fromEntries(project.transcript.segments.map((s) => [s.id, s]));
+  const segs = [...project.transcript.segments].sort((a, b) => (a.assetId === b.assetId ? a.start - b.start : 0));
+  return segs
+    .map((s) => {
+      const kept = idx.words(s.assetId).filter((w) => w.seg === s.id && w.keep);
+      const spoken = kept.reduce((n, w) => n + (w.e - w.s), 0) + Math.max(0, kept.length - 1) * 0.04;
+      const text = markedText(s.id, idx, segById) || s.text;
+      return `${s.id} [${names[s.assetId] || '?'} ${t(s.start)} · ${spoken.toFixed(1)}s · ${kept.length}w] ${text}`;
+    })
+    .join('\n');
 }
 
 function briefBlock(project) {
   const st = project.settings;
   const ref = project.assets.find((a) => a.kind === 'reference' && a.analysis);
+  const type = EDIT_TYPES[st.editType] || null;
   const lines = [
-    `Platform / format: ${st.platform || 'short-form social'} (${st.aspect})`,
-    `Target length: about ${st.targetLength || 45} seconds`,
+    `Format: vertical 9:16 reel (Instagram Reels / TikTok / YouTube Shorts)`,
+    `Target length: ${st.targetLength || 45} seconds of final, jump-cut-tight speech`,
+    type ? `Type of reel: ${type.label}: ${type.desc}` : st.editTypeLabel ? `Type of reel: ${st.editTypeLabel}` : null,
     `Audience: ${st.audience || 'not specified'}`,
     `Goal: ${st.goal || 'not specified'}`,
     st.tone ? `Tone: ${st.tone}` : null,
@@ -38,42 +52,78 @@ const GRAPHIC_GUIDE = Object.entries(GRAPHIC_TYPES)
   .map(([k, g]) => `- ${k}: ${g.desc}${g.fields.length ? ` (fields: ${g.fields.join(', ').replace('point', 'x, y = 0–1 position of the thing it points at')})` : ''}`)
   .join('\n');
 
-const RULES = `Rules:
-- Use ONLY transcript segment IDs that appear in the transcript (e.g. "s3"). Never invent IDs, timestamps, quotes or footage.
-- Story structure for short-form: hook (first ~3 s must earn attention), context, progression, payoff, call to action (only if it fits the goal).
-- The hook may be moved out of chronological order if a later line is a stronger opener.
-- Fit the target length: drop weak, repetitive or rambling segments. Prefer complete thoughts.
-- B-roll suggestions must be shots the creator could film themselves or license; explain why each shot helps.
-- Music: describe mood/tempo only. Do not name copyrighted songs or artists to copy.
-- Be honest in "review": tell the creator what to check (names, claims, jump cuts, missing B-roll).
-- Return ONLY a JSON object. No markdown, no commentary.`;
+const REEL_RULES = `HOW A PROFESSIONAL REEL EDITOR WORKS (follow every rule):
+1. HOOK (first 1–2 s): open on the single most scroll-stopping line in the footage: a bold or contrarian claim, a surprising number, a painful problem, a strong result, or the payoff teased as a question. It may come from anywhere in the transcript. NEVER open on greetings, names, "so", "okay", "today I want to", "in this video", context or setup.
+2. ONE IDEA: the reel tells one story or teaches one thing. Drop tangents, side stories, repeated points, hedging ("I think maybe", "kind of"), and setup that never pays off.
+3. STRUCTURE: hook → (at most one line of stakes or context) → progression that escalates (specifics, steps, example, proof) → payoff (the answer / insight / twist) → stop. Add a CTA only if the goal asks for one, and keep it to one short line. If the last line can loop back into the hook, prefer that ending.
+4. TAKES: speakers repeat themselves and restart sentences. When the same thought appears more than once, use ONLY the cleanest, most confident, complete take (usually the last one) and never two versions of it. Skip lines that trail off, are unfinished, are mostly ⟨removed⟩ words, or are mumbled.
+5. EVERY LINE EARNS ITS PLACE: if a line can be removed without the viewer missing it, remove it. Prefer short, punchy, concrete lines.
+6. LENGTH: the sum of the chosen lines' spoken seconds (shown per line) must land within ±15% of the target length. The cut is already jump-cut tight: all pauses, fillers, stutters and abandoned takes inside a line (marked ⟨like this⟩) are removed automatically, so judge lines by their kept words.
+7. TRIM LEAD-INS: use "trimStartWords" / "trimEndWords" (counts of KEPT words) to drop weak lead-ins or tails inside a line, e.g. "And the reason is" before the real point, or "…and yeah, that's it" at the end.
+8. GROUNDED: use ONLY transcript line IDs that exist. Never invent IDs, timestamps, quotes or footage.
+9. Return ONLY a JSON object. No markdown, no commentary.`;
 
-export function planPrompt(project) {
-  const system = `You are the story editor inside Editflow, a tool that turns talking-head, podcast and product footage into short-form social videos. You plan edits as structured data that the app applies to a timeline. The creator reviews everything before export.\n\n${RULES}`;
+const PLAN_SHAPE = (templates) => `{
+  "summary": "2-3 sentences: the angle and why this hook wins",
+  "hookOptions": [{"text": "the opening line", "segmentIds": ["s4"], "why": "why it stops the scroll"}],
+  "hookTitle": "optional 2-5 word on-screen title for the first 2 s, or empty string",
+  "beats": [{"role": "hook|context|progression|payoff|cta", "title": "...", "segmentIds": ["s4"], "why": "..."}],
+  "clips": [{"segmentIds": ["s4"], "role": "hook|context|progression|payoff|cta", "note": "why this line is here", "trimStartWords": 0, "trimEndWords": 0}],
+  "broll": [{"segmentId": "s6", "description": "what to show", "reason": "why it helps"}],
+  "overlays": [{"segmentId": "s9", "template": "${templates}", "text": "short on-screen text"}],
+  "music": {"mood": "e.g. warm, driving lo-fi", "tempo": "e.g. 95-110 BPM", "notes": "where it should lift or drop"},
+  "soundDesign": [{"segmentId": "s4", "description": "e.g. whoosh on the title"}],
+  "audio": {"suggestions": ["..."], "normalize": true, "denoise": false},
+  "review": ["what the creator should double-check"],
+  "changes": ["what this cut changed compared with the raw footage"]
+}
+"clips" is the final order of the reel. A clip may list several consecutive lines.`;
+
+/** House style trained by Editflow's editors for this type of reel (admin training studio). */
+export function styleBlock(style) {
+  if (!style) return '';
+  const rules = (style.rules || []).map((r) => `- ${r}`).join('\n');
+  const ex = (style.examples || [])
+    .slice(0, 3)
+    .map((e, i) => `Example ${i + 1}${e.title ? ` (${e.title})` : ''}:\nRaw lines: ${e.raw}\nThe editor's cut: ${e.cut}${e.why ? `\nWhy: ${e.why}` : ''}`)
+    .join('\n\n');
+  return `\n\nHOUSE STYLE for "${style.label}" reels (learned from Editflow's professional editors; follow it):\n${rules}${ex ? `\n\nWORKED EXAMPLES:\n${ex}` : ''}`;
+}
+
+export function planPrompt(project, style = null) {
+  const system = `You are the senior story editor inside Editflow, a professional editor for short-form vertical reels. You turn raw talking footage into the most engaging possible reel, as structured data the app applies to a timeline. You are ruthless about retention.\n\n${REEL_RULES}${styleBlock(style)}`;
   const templates = Object.keys(OVERLAY_TEMPLATES).join(' | ');
   const user = `CREATOR BRIEF
 ${briefBlock(project)}
 
-TRANSCRIPT (segment id [asset start–end] text)
+TRANSCRIPT (line id [file start · spoken seconds after clean-up · kept words] text; ⟨…⟩ = removed automatically)
 ${transcriptBlock(project)}
 
 Return JSON with exactly this shape:
-{
-  "summary": "2-3 sentences: the story angle you chose and why",
-  "hookOptions": [{"text": "line or on-screen hook", "segmentIds": ["s4"], "why": "..."}],
-  "hookTitle": "optional 2-6 word on-screen title for the first seconds, or empty string",
-  "beats": [{"role": "hook|context|progression|payoff|cta", "title": "...", "segmentIds": ["s4"], "why": "..."}],
-  "clips": [{"segmentIds": ["s4"], "role": "hook|context|progression|payoff|cta", "note": "why this clip is here", "trimStart": 0, "trimEnd": 0}],
-  "captions": [{"segmentId": "s4", "text": "optional tightened caption text for that segment"}],
-  "broll": [{"segmentId": "s6", "description": "what to show", "reason": "why it helps the story"}],
-  "overlays": [{"segmentId": "s9", "template": "${templates}", "text": "short on-screen text"}],
-  "music": {"mood": "e.g. warm, driving lo-fi", "tempo": "e.g. 95-110 BPM", "notes": "where it should lift or drop"},
-  "soundDesign": [{"segmentId": "s4", "description": "e.g. subtle whoosh on the title"}],
-  "audio": {"suggestions": ["..."], "normalize": true, "denoise": false},
-  "review": ["things the creator should check"],
-  "changes": ["what this first cut changed compared with the raw footage"]
+${PLAN_SHAPE(templates)}`;
+  return { system, user };
 }
-"clips" is the final order of the cut. trimStart/trimEnd are optional seconds (0-2) to shave inside a clip.`;
+
+/** Second pass: a senior editor reviews the draft cut as it will actually play and fixes it. */
+export function criticPrompt(project, plan, script, qa, style = null) {
+  const system = `You are the head of post-production at a top short-form studio, reviewing a reel cut before it ships. Be demanding: a reel that doesn't hold attention in the first 2 seconds, repeats itself, rambles, or ends weakly fails.\n\n${REEL_RULES}${styleBlock(style)}`;
+  const templates = Object.keys(OVERLAY_TEMPLATES).join(' | ');
+  const user = `CREATOR BRIEF
+${briefBlock(project)}
+
+TRANSCRIPT (line id [file start · spoken seconds · kept words] text; ⟨…⟩ = removed automatically)
+${transcriptBlock(project)}
+
+DRAFT PLAN
+${JSON.stringify({ hookTitle: plan.hookTitle, clips: plan.clips, summary: plan.summary })}
+
+THE DRAFT AS IT WILL PLAY (after automatic clean-up)
+${script}
+
+MEASURED CHECKS: ${qa.checks.filter((c) => c.level !== 'ok').map((c) => c.title).join('; ') || 'none failing'}. Length ${qa.stats.duration}s.
+
+Score the draft, then return the IMPROVED plan (or the same plan if it can't be improved). Fix: a hook that isn't the strongest line, duplicate takes, lines that don't earn their place, unfinished thoughts, a missing or buried payoff, a weak ending, wrong length.
+Return JSON: {"scores": {"hook": 1-10, "retention": 1-10, "clarity": 1-10, "payoff": 1-10}, "issues": ["what was wrong"], "plan": ${PLAN_SHAPE(templates)}}`;
   return { system, user };
 }
 

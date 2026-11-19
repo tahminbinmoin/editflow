@@ -384,3 +384,135 @@ test('captions: frame-accurate timecodes and Premiere-style stretching', () => {
   assert.throws(() => applyOp(tl, { type: 'updateCaption', captionId: 'k1', patch: { end: 11 + 1 / FPS } }), /at least 2 frames/);
   assert.throws(() => applyOp(tl, { type: 'updateCaption', captionId: 'k1', patch: { start: 'x' } }));
 });
+
+// ---------- clean cut: words, disfluencies, silence, mumbles ----------
+import { flagWords, segmentsFromWords, estimateWords, alignWords } from '../shared/words.js';
+import { cutRanges, cleanTimeline, assetWords, CUT_MODES } from '../shared/cleancut.js';
+import { voiceActivity } from '../shared/speech.js';
+import { reviewCut } from '../shared/quality.js';
+import { exampleFromProject, fineTuneRecords } from '../shared/training.js';
+import { planPrompt } from '../shared/prompts.js';
+import { checkLimit } from '../shared/plans.js';
+
+const W = (list) => list.map(([t, s, e]) => ({ t, s, e }));
+const RAW = W([
+  ['So,', 0.5, 0.7], ['um,', 0.9, 1.2], ['the', 1.3, 1.4], ['the', 1.45, 1.55], ['best', 1.6, 1.9], ['way', 1.95, 2.1], ['to', 2.1, 2.2], ['make', 2.25, 2.5], ['coffee...', 2.5, 2.9],
+  ['The', 3.6, 3.7], ['best', 3.75, 4.0], ['way', 4.05, 4.2], ['to', 4.2, 4.3], ['make', 4.35, 4.6], ['coffee', 4.6, 4.9], ['is', 4.95, 5.05], ['a', 5.1, 5.15], ['French', 5.2, 5.5], ['press.', 5.5, 5.9],
+  ['It', 7.2, 7.3], ['takes', 7.35, 7.6], ['four', 7.65, 7.9], ['minutes.', 7.95, 8.5],
+]);
+// sound at 6.2–6.6 has no words: a mumble
+const VOICE = [[0.48, 0.72], [0.88, 1.22], [1.28, 2.95], [3.58, 5.95], [6.2, 6.6], [7.18, 8.6]];
+
+test('clean cut: fillers, stutters and the abandoned take are flagged; the last take is kept', () => {
+  const f = flagWords(RAW);
+  assert.deepEqual(f.slice(0, 9), ['filler', 'filler', 'stutter', 'retake', 'retake', 'retake', 'retake', 'retake', 'retake']);
+  assert.ok(f.slice(9).every((x) => x === null), 'the complete second take and the next sentence stay');
+  // parallel sentences are not mistaken for retakes
+  const par = W([['I', 0, 0.1], ['want', 0.1, 0.3], ['to', 0.3, 0.4], ['show', 0.4, 0.6], ['you', 0.6, 0.7], ['this.', 0.7, 1], ['I', 1.05, 1.1], ['want', 1.1, 1.3], ['to', 1.3, 1.4], ['show', 1.4, 1.6], ['you', 1.6, 1.7], ['that.', 1.7, 2]]);
+  assert.ok(flagWords(par).every((x) => x === null));
+  // emphasis doubles and comma-less "like" are kept
+  assert.ok(flagWords(W([['It', 0, 0.1], ['is', 0.1, 0.2], ['very', 0.2, 0.4], ['very', 0.4, 0.6], ['good', 0.6, 0.9], ['like', 1, 1.2], ['this.', 1.2, 1.5]])).every((x) => x === null));
+  // words the speech-to-text "heard" in silence
+  assert.equal(flagWords(W([['Thank', 5, 5.2], ['you.', 5.2, 5.4]]), [[0, 1]])[0], 'noise');
+});
+
+test('clean cut: cuts land on the voice edges, every pause over the limit and every mumble is removed', () => {
+  const words = RAW.map((w, i) => ({ ...w, keep: i >= 9 }));
+  const r = cutRanges(words, VOICE, 'tight');
+  assert.equal(r.length, 2, JSON.stringify(r));
+  // starts 40 ms before the voice, ends 80 ms after it, never inside the dropped take
+  assert.ok(Math.abs(r[0].in - 3.54) < 0.011 && Math.abs(r[0].out - 6.03) < 0.011, JSON.stringify(r[0]));
+  assert.ok(r[1].in > 6.6, 'the mumble between the sentences is not in the cut');
+  // a short pause stays in Natural, is cut in Ultra
+  const pause = W([['one', 0, 0.3], ['two', 0.55, 0.8]]).map((w) => ({ ...w, keep: true }));
+  const v = [[0, 0.31], [0.54, 0.81]];
+  assert.equal(cutRanges(pause, v, 'natural').length, 1);
+  assert.equal(cutRanges(pause, v, 'ultra').length, 2);
+  // voice with no words between two kept words (a mumble) splits even a short gap
+  const mum = W([['one', 0, 0.3], ['two', 0.6, 0.9]]).map((w) => ({ ...w, keep: true }));
+  assert.equal(cutRanges(mum, [[0, 0.31], [0.35, 0.55], [0.59, 0.91]], 'natural').length, 2);
+});
+
+test('clean cut: plan → frame-tight clips, word-timed captions, punch-ins on jump cuts, word restore', () => {
+  const segs = segmentsFromWords(RAW).map((s, i) => ({ id: `s${i + 1}`, assetId: 'a1', ...s }));
+  assert.deepEqual(segs.map((s) => s.text.split(' ')[0]), ['So,', 'The', 'It']);
+  const transcript = { segments: segs };
+  const assets = [{ id: 'a1', duration: 10, voice: VOICE }];
+  const { plan } = cleanPlan({ clips: [{ segmentIds: ['s1', 's2', 's3'], role: 'hook' }] }, segs);
+  const tl = planToTimeline(plan, segs, { transcript, assets });
+  const { clips, duration } = layout(tl);
+  assert.equal(clips.length, 2);
+  assert.ok(duration < 4.2, `fillers, the retake and the pauses are gone (${duration}s of 8.5s)`);
+  assert.deepEqual(clips.map((c) => c.zoom), [1, 1.12], 'jump cut gets a punch-in');
+  const caps = timelineCaptions(tl);
+  assert.ok(caps.every((c) => c.text.split(' ').length <= 3));
+  assert.ok(caps.every((c) => c.w && c.w.length === c.text.split(' ').length), 'each caption word has its own timing');
+  assert.ok(!caps.some((c) => /\bum\b|So/.test(c.text)));
+  assert.equal(reviewCut({ transcript, assets, settings: { targetLength: 5 }, timeline: tl }, tl).checks.find((c) => c.id === 'silence').level, 'ok');
+  // restore "So," by hand: only that part is re-cut
+  segs[0].words[0].k = 1;
+  const re = cleanTimeline(tl, transcript, assets, { only: [['a1', 0.6]] });
+  assert.equal(layout(re.timeline).clips.length, 3);
+  assert.ok(layout(re.timeline).clips[0].in < 0.5);
+  // a manual trim takes the clip out of its group, so a re-clean respects it
+  const trimmed = applyOp(tl, { type: 'trimClip', clipId: clips[0].id, in: 4 });
+  assert.equal(trimmed.clips[0].grp, undefined);
+  const again = cleanTimeline(trimmed, transcript, assets);
+  assert.ok(layout(again.timeline).clips[0].in >= 4);
+});
+
+test('clean cut: re-clean with silences in an old-style cut, and the quality check finds them first', () => {
+  const segs = segmentsFromWords(RAW).map((s, i) => ({ id: `s${i + 1}`, assetId: 'a1', ...s }));
+  const project = { transcript: { segments: segs }, assets: [{ id: 'a1', duration: 10, voice: VOICE }], settings: { targetLength: 30 } };
+  const raw = normalizeTimeline({ clips: [{ id: 'c1', assetId: 'a1', in: 0, out: 9 }], captions: { items: [] } });
+  const before = reviewCut(project, raw);
+  assert.equal(before.checks.find((c) => c.id === 'silence').level, 'error');
+  assert.equal(before.checks.find((c) => c.id === 'fillers').level, 'error');
+  assert.equal(before.checks.find((c) => c.id === 'mumble').level, 'error', 'the wordless sound at 6.2 s');
+  const { timeline, removedSeconds } = cleanTimeline(raw, project.transcript, project.assets);
+  assert.ok(removedSeconds > 4, String(removedSeconds));
+  const after = reviewCut(project, timeline);
+  for (const id of ['silence', 'fillers', 'hook']) assert.equal(after.checks.find((c) => c.id === id).level, 'ok', id);
+  assert.equal(after.checks.find((c) => c.id === 'mumble'), undefined);
+  assert.ok(after.score > before.score);
+});
+
+test('words: voice activity map, estimated timing, alignment of better text onto timed words', () => {
+  const rate = 16000;
+  const s = new Int16Array(rate * 3);
+  for (let i = 0; i < s.length; i++) {
+    const t = i / rate;
+    s[i] = Math.round((t > 0.5 && t < 1.2) || (t > 2 && t < 2.6) ? 8000 * Math.sin(t * 2 * Math.PI * 180) : ((i % 5) - 2) * 3);
+  }
+  const v = voiceActivity(s, rate);
+  assert.equal(v.length, 2);
+  assert.ok(Math.abs(v[0][0] - 0.5) <= 0.02 && Math.abs(v[0][1] - 1.2) <= 0.02 && Math.abs(v[1][1] - 2.6) <= 0.02, JSON.stringify(v));
+  const est = estimateWords('one two three', 0, 3, v);
+  assert.ok(est[0].s >= 0.49 && est[2].e <= 2.61, JSON.stringify(est));
+  const al = alignWords(['Hello,', 'my', 'friend.'], W([['hello', 1, 1.2], ['friend', 1.5, 1.9]]));
+  assert.deepEqual(al.map((w) => [w.t, w.s]), [['Hello,', 1], ['my', 1.2], ['friend.', 1.5]]);
+});
+
+test('training: a finished edit becomes an example and a fine-tuning record', () => {
+  const segs = segmentsFromWords(RAW).map((s, i) => ({ id: `s${i + 1}`, assetId: 'a1', ...s }));
+  const project = { settings: { targetLength: 10 }, transcript: { segments: segs }, assets: [{ id: 'a1', duration: 10, voice: VOICE }] };
+  const final = normalizeTimeline({ clips: [{ id: 'c1', assetId: 'a1', in: 7.1, out: 8.6 }, { id: 'c2', assetId: 'a1', in: 3.5, out: 6 }] });
+  const ai = normalizeTimeline({ clips: [{ id: 'c1', assetId: 'a1', in: 3.5, out: 6 }] });
+  const ex = exampleFromProject({ ...project, timeline: final }, { aiTimeline: ai });
+  assert.deepEqual(ex.lines.filter((l) => l.kept).sort((a, b) => a.order - b.order).map((l) => l.id), ['s3', 's2']);
+  assert.equal(ex.hook.id, 's3');
+  assert.deepEqual(ex.aiDiff.added, ['s3']);
+  assert.equal(ex.aiDiff.hookChanged, true);
+  const [line] = fineTuneRecords([{ title: 't', data: ex }], planPrompt);
+  const rec = JSON.parse(line);
+  assert.match(rec.messages[1].content, /s1 \[A1/);
+  assert.deepEqual(JSON.parse(rec.messages[2].content).clips.map((c) => c.segmentIds[0]), ['s3', 's2']);
+});
+
+test('plans: limits are ready for billing (unlimited = null)', () => {
+  assert.deepEqual(checkLimit('free', 4, 'export'), { allowed: true, limit: 5, used: 4, remaining: 1 });
+  assert.equal(checkLimit('free', 5, 'export').allowed, false);
+  assert.equal(checkLimit('pro', 9999, 'export').allowed, true);
+  assert.equal(checkLimit('nope', 0, 'ai_task').limit, 40, 'unknown plans fall back to free');
+  assert.ok(CUT_MODES.tight.maxPause < CUT_MODES.natural.maxPause);
+});

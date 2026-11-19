@@ -4,19 +4,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api.js';
 import { currentUser } from './supabase.js';
 import * as store from './store.js';
-import { assetUrls, assetBlob, probeFile, decodeAudio, peaksFrom, silencesFrom, thumbnailFrom, analyzeReference, speechWav, uploadToStorage, sampleCut } from './media.js';
+import { assetUrls, assetBlob, probeFile, decodeAudio, peaksFrom, silencesFrom, voiceFrom, thumbnailFrom, analyzeReference, speechWav, uploadToStorage, sampleCut } from './media.js';
 import * as folder from './localFolder.js';
 import { useToast } from '../components/ui.jsx';
 import { useAuth } from '../App.jsx';
 import { applyOps, describeOp, diffSummary, uid, normalizeTimeline } from '@shared/timeline.js';
 import { cleanPlan, planToTimeline } from '@shared/plan.js';
 import { rulePlan, ruleRefine } from '@shared/rules.js';
-import { parseTranscriptFile, setAssetSegments } from '@shared/transcript.js';
+import { parseTranscriptFile, setAssetSegments, cleanWords } from '@shared/transcript.js';
+import { cleanTimeline, CUT_MODES, assetWords } from '@shared/cleancut.js';
+import { alignWords, tokens } from '@shared/words.js';
 import { mapLimit } from '@shared/speech.js';
 import { SETTINGS_KEYS } from '@shared/project.js';
 import { ASPECTS } from '@shared/timeline.js';
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
+const cleanTimelineWords = (p, assetId) => assetWords(p.transcript, assetId, p.assets.find((a) => a.id === assetId)?.voice);
 const activeUploads = new Set(); // asset ids being processed in this tab
 const ext = (name) => (String(name).toLowerCase().match(/\.[a-z0-9]{1,5}$/) || ['.bin'])[0];
 
@@ -29,6 +32,7 @@ export function useProject(id) {
   const [consent, setConsent] = useState(null);
   const [urls, setUrls] = useState({});
   const [folders, setFolders] = useState({}); // folderId → { name, status }
+  const [status, setStatus] = useState(null); // progress text for long AI actions
   const ref = useRef(null);
 
   const setProject = useCallback((p) => {
@@ -121,11 +125,39 @@ export function useProject(id) {
     [id, mutate],
   );
 
+  /** Voice maps for footage that has transcript lines but no map yet (older uploads, caption imports). */
+  const ensureVoice = useCallback(async () => {
+    const p = ref.current;
+    const need = p.assets.filter((a) => !a.voice && a.status === 'ready' && a.hasAudio !== false && (a.kind === 'footage' || !a.kind) && p.transcript.segments.some((s) => s.assetId === a.id));
+    for (const a of need) {
+      try {
+        setStatus(`Measuring the voice in ${a.name}…`);
+        const buf = a.duration < 1800 ? await decodeAudio(await assetBlob(a, urls)) : null;
+        if (!buf) continue;
+        const voice = voiceFrom(buf);
+        await mutate((d) => {
+          const x = d.assets.find((y) => y.id === a.id);
+          if (x) x.voice = voice;
+        });
+      } catch {
+        // without a voice map the cut uses word timing alone
+      } finally {
+        setStatus(null);
+      }
+    }
+  }, [mutate, urls]);
+
   const ops = useCallback(
     async (list, label) => {
       const p = ref.current;
       const res = applyOps(p.timeline, list, { assets: p.assets });
       if (!res.applied.length) return toast(res.errors[0]?.error || 'Nothing to change', 'err');
+      // clips added with speech in them get the same clean cut as the rest (no silence, fillers, mumbles)
+      if (res.applied.some((o) => o.type === 'addClip') && p.transcript.segments.length) {
+        const before = new Set(p.timeline.clips.map((c) => c.id));
+        const added = res.timeline.clips.filter((c) => !before.has(c.id)).map((c) => [c.assetId, (c.in + c.out) / 2]);
+        if (added.length) res.timeline = normalizeTimeline(cleanTimeline(res.timeline, p.transcript, p.assets, { only: added }).timeline);
+      }
       // Optimistic: show the change immediately, then record it.
       setProject({ ...p, timeline: res.timeline });
       const name = label || describeOp(res.applied[0], p.timeline) + (res.applied.length > 1 ? ` (+${res.applied.length - 1} more)` : '');
@@ -141,7 +173,6 @@ export function useProject(id) {
     if (ref.current.consent?.[providerId]?.allowed) return false;
     throw Object.assign(new Error('Consent needed'), { code: 'consent_required', provider: { id: providerId, name, dataUse, kind } });
   };
-  const [status, setStatus] = useState(null); // progress text for long AI actions
 
   const act = useMemo(
     () => ({
@@ -175,6 +206,7 @@ export function useProject(id) {
         run('firstCut', async () => {
           const p = ref.current;
           if (!p.transcript.segments.length) throw new Error('Add a transcript first (Transcript tab).');
+          await ensureVoice();
           let raw;
           let meta;
           if (forceRules || !engine || engine.id === 'rules') {
@@ -185,8 +217,9 @@ export function useProject(id) {
           }
           const { plan, warnings } = cleanPlan(raw, p.transcript.segments);
           if (!plan.clips.length) throw new Error(`The ${meta.providerName} plan had no usable clips. ${warnings.slice(0, 2).join(' ')}`);
-          const timeline = planToTimeline(plan, p.transcript.segments, { aspect: p.timeline.format.aspect, previous: p.timeline });
-          const pending = { id: uid('prop'), kind: 'firstCut', summary: plan.summary, plan: { ...plan, warnings, meta }, timeline, changes: diffSummary(p.timeline, timeline), meta, createdAt: new Date().toISOString() };
+          const cur = ref.current;
+          const timeline = planToTimeline(plan, cur.transcript.segments, { aspect: '9:16', previous: cur.timeline, transcript: cur.transcript, assets: cur.assets, mode: cur.settings.cutMode || cur.timeline.cut?.mode });
+          const pending = { id: uid('prop'), kind: 'firstCut', summary: plan.summary, plan: { ...plan, warnings, meta, editorReview: raw.editorReview || null }, timeline, changes: diffSummary(p.timeline, timeline), meta, createdAt: new Date().toISOString() };
           await mutate((d) => {
             d.pending = pending;
             d.chat.push({ role: 'assistant', text: plan.summary, at: pending.createdAt, meta, proposalId: pending.id });
@@ -208,6 +241,10 @@ export function useProject(id) {
             ({ meta, ...out } = await api('/ai/refine', { method: 'POST', body: { projectId: p.id, request } }));
           }
           const res = applyOps(p.timeline, out.ops || [], { assets: p.assets });
+          // lines the AI added come in raw: clean them like the rest of the cut
+          const before = new Set(p.timeline.clips.map((c) => c.id));
+          const added = res.timeline.clips.filter((c) => !before.has(c.id)).map((c) => [c.assetId, (c.in + c.out) / 2]);
+          if (added.length) res.timeline = normalizeTimeline(cleanTimeline(res.timeline, p.transcript, p.assets, { only: added }).timeline);
           const notes = [...(out.notes || []), ...res.errors.map((e) => `Skipped one step: ${e.error}`)];
           const now = new Date().toISOString();
           const userMsg = { role: 'user', text: request, at: now };
@@ -406,7 +443,10 @@ export function useProject(id) {
           let peaks = null;
           if (buf) {
             peaks = peaksFrom(buf);
-            if (kind === 'footage') fields.silences = silencesFrom(buf);
+            if (kind === 'footage') {
+              fields.silences = silencesFrom(buf);
+              fields.voice = voiceFrom(buf);
+            }
           }
           let thumb = null;
           if (info.hasVideo) thumb = await thumbnailFrom(file).catch(() => null);
@@ -516,8 +556,57 @@ export function useProject(id) {
       editSegment: (sid, text) =>
         mutate((p) => {
           const s = p.transcript.segments.find((x) => x.id === sid);
-          if (s) s.text = String(text).slice(0, 600);
+          if (!s) return;
+          s.text = String(text).slice(0, 600);
+          // keep word timing: put the corrected words on the old words' times
+          if (s.words?.length) s.words = cleanWords(alignWords(tokens(s.text), s.words) || []);
         }),
+      /** Re-cut the whole edit: remove every silence, filler, stutter, retake and mumble (undoable). */
+      cleanUp: (mode) =>
+        run('cleanUp', async () => {
+          await ensureVoice();
+          const p = ref.current;
+          if (!p.timeline.clips.length) throw new Error('Make a first cut first.');
+          const m = CUT_MODES[mode] ? mode : p.timeline.cut?.mode;
+          const { timeline, removedSeconds } = cleanTimeline(p.timeline, p.transcript, p.assets, { mode: m });
+          await commit(normalizeTimeline(timeline), `Clean cut (${CUT_MODES[timeline.cut.mode].label.toLowerCase()})`, 'user');
+          toast(removedSeconds > 0.05 ? `Removed ${removedSeconds.toFixed(1)} s of silence, fillers and retakes` : 'The cut is already clean');
+        }),
+      /** Cut a word by hand, or bring back one the clean cut removed; the part of the edit around it is re-cut. */
+      toggleWord: (segId, i) =>
+        run('toggleWord', async () => {
+          let at = null;
+          let label = '';
+          await mutate((p) => {
+            const s = p.transcript.segments.find((x) => x.id === segId);
+            if (!s) return;
+            const words = cleanTimelineWords(p, s.assetId);
+            if (!s.words?.length) {
+              // lines without word timing (imported captions): store the estimated words so they can be toggled
+              s.words = words.filter((x) => x.seg === segId).map(({ t, s: a, e }) => ({ t, s: a, e, a: 1 }));
+              s.approx = true;
+            }
+            const w = s.words[i];
+            if (!w) return;
+            const live = words.find((x) => x.seg === segId && x.i === i);
+            if (live?.keep) {
+              delete w.k;
+              w.c = 1;
+              label = `Cut “${w.t}”`;
+            } else {
+              delete w.c;
+              if (live?.flag) w.k = 1;
+              label = `Restore “${w.t}”`;
+            }
+            at = [s.assetId, (w.s + w.e) / 2];
+          });
+          if (!at) return;
+          const p = ref.current;
+          if (!p.timeline.clips.length) return;
+          const { timeline } = cleanTimeline(p.timeline, p.transcript, p.assets, { only: [at] });
+          await commit(normalizeTimeline(timeline), label, 'user');
+        }),
+
       /** OpenAI speech-to-text: the audio track (16 kHz mono WAV) goes to Storage, the API splits it at pauses and transcribes each part. */
       transcribe: (assetId) =>
         run('transcribing', async () => {
@@ -536,22 +625,29 @@ export function useProject(id) {
             const out = await api('/transcribe/openai', { method: 'POST', body: { projectId: id, assetId, path } });
             if (!out.segments?.length) throw new Error('No speech was found in this file.');
             let count = 0;
-            await mutate((p) => (count = setAssetSegments(p.transcript, assetId, out.segments, 'openai-transcribe')));
-            toast(`Transcribed ${count} lines with OpenAI`);
+            const voice = voiceFrom(buf);
+            await mutate((p) => {
+              count = setAssetSegments(p.transcript, assetId, out.segments, 'openai-transcribe');
+              const asset = p.assets.find((x) => x.id === assetId);
+              if (asset) asset.voice = voice;
+            });
+            toast(out.timing === 'estimated' ? `Transcribed ${count} lines. Word timing was estimated from the audio (word timing model unavailable).` : `Transcribed ${count} lines with word-level timing`);
           } finally {
             setStatus(null);
           }
         }),
 
       // ----- exports -----
-      recordExport: (rec) =>
-        mutate((p) => {
+      recordExport: (rec) => {
+        if (rec.status === 'done') store.recordUsage('export', 1, id);
+        return mutate((p) => {
           p.exports = [rec, ...(p.exports || []).filter((e) => e.id !== rec.id)].slice(0, 10);
           if (rec.status === 'done') p.status = 'exported';
-        }),
+        });
+      },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [id, engine, mutate, commit, run, urls],
+    [id, engine, mutate, commit, run, urls, ensureVoice],
   );
 
   const allowConsent = useCallback(async () => {

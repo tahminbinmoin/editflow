@@ -117,3 +117,11 @@ export async function deleteProject(project) {
   if (user) await removeStoragePrefix(`${user.id}/${project.id}`).catch(() => {});
   check(await supabase.from('projects').delete().eq('id', project.id));
 }
+
+/** Usage for plan limits (billing-ready; see server/billing). Best effort. */
+export function recordUsage(kind, amount = 1, projectId = null) {
+  return supabase
+    .from('usage_events')
+    .insert({ kind, amount, project_id: projectId })
+    .then(() => {}, () => {});
+}

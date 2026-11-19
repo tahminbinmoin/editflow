@@ -62,8 +62,31 @@ export function setAssetSegments(transcript, assetId, segments, source) {
   let next = Math.max(0, ...transcript.segments.map((s) => Number(String(s.id).slice(1)) || 0)) + 1;
   const fresh = segments
     .filter((s) => s.text && Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start)
-    .map((s) => ({ id: `s${next++}`, assetId, start: +(+s.start).toFixed(2), end: +(+s.end).toFixed(2), text: String(s.text).trim().slice(0, 600) }));
+    .map((s) => {
+      const seg = { id: `s${next++}`, assetId, start: +(+s.start).toFixed(2), end: +(+s.end).toFixed(2), text: String(s.text).trim().slice(0, 600) };
+      const words = cleanWords(s.words);
+      if (words.length) {
+        seg.words = words;
+        if (s.approx || words.some((w) => w.a)) seg.approx = true;
+      }
+      return seg;
+    });
   transcript.segments = [...others, ...fresh];
   transcript.source = source;
   return fresh.length;
+}
+
+/** Validated word list: [{ t, s, e, a?, k?, c? }] in time order (max 200 per line). */
+export function cleanWords(words) {
+  if (!Array.isArray(words)) return [];
+  return words
+    .filter((w) => w && typeof w.t === 'string' && w.t.trim() && Number.isFinite(+w.s) && Number.isFinite(+w.e) && +w.e >= +w.s)
+    .slice(0, 200)
+    .map((w) => {
+      const o = { t: w.t.trim().slice(0, 60), s: Math.round(+w.s * 1000) / 1000, e: Math.round(+w.e * 1000) / 1000 };
+      if (w.a) o.a = 1;
+      if (w.k) o.k = 1;
+      if (w.c) o.c = 1;
+      return o;
+    });
 }

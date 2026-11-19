@@ -56,7 +56,14 @@ function think(system, text, images) {
       notes: ['mock visual note'],
     };
   }
+  if (/house style guide/.test(system)) {
+    return { rules: ['Open on the result, never the setup', 'Cut any line that repeats the hook', 'End on the payoff line'], examples: [{ title: 'mock', raw: 's1: raw line', cut: 's1', why: 'mock lesson' }], pacing: { targetLength: 30, cutMode: 'ultra' }, summary: 'Mock house style.' };
+  }
   const pick = ids.slice(0, 6);
+  if (/head of post-production/.test(system)) {
+    // the reviewer drops the weakest middle line and keeps the rest
+    return { scores: { hook: 6, retention: 7, clarity: 8, payoff: 6 }, issues: ['mock: a middle line repeated the hook'], plan: { summary: 'Mock revised plan.', hookTitle: 'Mock title', clips: [{ segmentIds: [pick[pick.length - 1]], role: 'hook' }, ...pick.slice(1, -1).map((id) => ({ segmentIds: [id], role: 'progression' }))], broll: [], overlays: [], music: { mood: 'mock mood' }, soundDesign: [], audio: { normalize: true }, review: ['mock review'], changes: ['mock change'] } };
+  }
   return {
     summary: 'Mock plan for testing.',
     hookOptions: [{ text: 'mock', segmentIds: [pick[pick.length - 1]], why: 'mock' }],
@@ -114,7 +121,7 @@ export function startMock(port = PORT) {
     if (url.startsWith('/openai/v1/')) {
       if (req.headers.authorization !== 'Bearer sk-test') return reply(res, 401, { error: { message: 'Incorrect API key provided' } });
       const p = url.slice('/openai/v1'.length);
-      if (p.startsWith('/models')) return reply(res, 200, { data: ['gpt-6.2-sol', 'gpt-6-luna', 'gpt-transcribe', 'gpt-image-2', 'text-embedding-3-small'].map((id) => ({ id })) });
+      if (p.startsWith('/models')) return reply(res, 200, { data: ['gpt-6.2-sol', 'gpt-6-luna', 'gpt-transcribe', 'whisper-1', 'gpt-image-2', 'text-embedding-3-small'].map((id) => ({ id })) });
       if (p === '/images/generations' && req.method === 'POST') {
         const body = JSON.parse((await readRaw(req)).toString());
         state.requests.push({ vendor: 'openai', kind: 'image', model: body.model, size: body.size, prompt: body.prompt });
@@ -125,6 +132,15 @@ export function startMock(port = PORT) {
         const raw = await readRaw(req);
         const n = ++transcribed;
         state.requests.push({ vendor: 'openai', kind: 'transcribe', bytes: raw.length, model: (raw.toString('latin1').match(/name="model"\r\n\r\n([^\r]+)/) || [])[1] });
+        const model = (raw.toString('latin1').match(/name="model"\r\n\r\n([^\r]+)/) || [])[1];
+        if (/name="timestamp_granularities\[\]"\r\n\r\nword/.test(raw.toString('latin1'))) {
+          // verbose_json with word times spread over the audio (16 kHz mono 16-bit WAV)
+          const dataAt = raw.indexOf('data', raw.indexOf('WAVE'));
+          const secs = dataAt > 0 ? raw.readUInt32LE(dataAt + 4) / 32000 : 1;
+          const said = ['Mock', 'line', String(n)];
+          const words = said.map((w, i) => ({ word: w, start: +((secs * i) / 3).toFixed(2), end: +((secs * (i + 0.9)) / 3).toFixed(2) }));
+          return reply(res, 200, { text: `Mock line ${n}.`, words, model });
+        }
         return reply(res, 200, { text: `Mock line ${n}.` });
       }
       if (p === '/chat/completions' && req.method === 'POST') {
@@ -134,7 +150,7 @@ export function startMock(port = PORT) {
         const parts = Array.isArray(user) ? user : [{ type: 'text', text: user }];
         const text = parts.filter((x) => x.type === 'text').map((x) => x.text).join('\n');
         const images = parts.filter((x) => x.type === 'image_url' && /^(data:image\/jpeg;base64,|https?:)/.test(x.image_url.url)).length;
-        state.requests.push({ vendor: 'openai', kind: 'chat', model: body.model, images, json: body.response_format?.type });
+        state.requests.push({ vendor: 'openai', kind: 'chat', model: body.model, images, json: body.response_format?.type, system: String(body.messages?.[0]?.content || '') });
         return reply(res, 200, { model: body.model, choices: [{ message: { role: 'assistant', content: 'Plan:\n```json\n' + JSON.stringify(think(system, text, images)) + '\n```' } }], usage: { prompt_tokens: 100, completion_tokens: 50 } });
       }
     }

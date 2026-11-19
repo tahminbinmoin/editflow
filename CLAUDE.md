@@ -12,4 +12,7 @@ Essentials:
 - Keys are encrypted with `EDITFLOW_SECRET` server-side and never returned to the browser.
 - Video never goes through the API (Vercel's request limit is 4.5 MB): uploads go straight to Supabase Storage, or assets are read from a linked local folder (`client/src/lib/localFolder.js`, `source: 'local'`). Read media through `media.assetUrls`/`assetBlob` so both kinds work.
 - Schema changes: add a new file in `supabase/migrations/` and apply it to the project.
+- Reels only (9:16). Cuts go through the clean cut (`shared/cleancut.js`): never build clips straight from line start/end; use `planToTimeline` / `cleanTimeline` so silences, fillers, retakes and mumbles stay out.
+- Admin-only features check `is_admin()` (SQL) / `requireAdmin` (API). Nobody becomes admin except through `claim_admin` with an invite code.
+- Billing is scaffolded but off: record usage with `recordUsage`, check limits with `assertAllowed` (no-ops until `BILLING_ENABLED=true`).
 - Run `npm test` before finishing; add unit tests for new ops.

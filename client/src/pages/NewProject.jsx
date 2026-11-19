@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { UploadCloud, X, Link2 } from 'lucide-react';
 import AppHeader from '../components/AppHeader.jsx';
@@ -8,18 +8,15 @@ import { supportsFolderAccess, pickFolder, registerPickedFiles, listFolder } fro
 import { FolderFileList } from '../components/FolderBrowser.jsx';
 import { HardDrive, CloudUpload } from 'lucide-react';
 import { Progress, bytes, useToast } from '../components/ui.jsx';
-import { ASPECTS } from '@shared/timeline.js';
+import { EDIT_TYPES, DEFAULT_EDIT_TYPE } from '@shared/styles.js';
+import { CUT_MODES, DEFAULT_CUT } from '@shared/cleancut.js';
+import { api } from '../lib/api.js';
 import { MAX_UPLOAD_MB } from '@shared/config.js';
 import { newProjectData } from '@shared/project.js';
 import { BRAND } from '../lib/brand.js';
 
-const PLATFORMS = {
-  '9:16': 'TikTok / Reels / Shorts',
-  '1:1': 'Instagram or LinkedIn feed (square)',
-  '4:5': 'Instagram or LinkedIn feed (portrait)',
-  '16:9': 'YouTube / website',
-};
 const LENGTHS = [15, 30, 45, 60, 90];
+const BUILT_IN_TYPES = Object.entries(EDIT_TYPES).map(([key, t]) => ({ key, ...t, trained: false }));
 
 export function Dropzone({ accept = 'video/*,audio/*', multiple = true, onFiles, label, sub }) {
   const ref = useRef();
@@ -53,7 +50,15 @@ export function Dropzone({ accept = 'video/*,audio/*', multiple = true, onFiles,
 export default function NewProject() {
   const nav = useNavigate();
   const toast = useToast();
-  const [s, setS] = useState({ name: '', aspect: '9:16', targetLength: 45, audience: '', goal: '', tone: '', notes: '', referenceNotes: '', referenceUrl: '' });
+  const [s, setS] = useState({ name: '', aspect: '9:16', editType: DEFAULT_EDIT_TYPE, cutMode: DEFAULT_CUT, targetLength: 30, audience: '', goal: '', tone: '', notes: '', referenceNotes: '', referenceUrl: '' });
+  const [types, setTypes] = useState(BUILT_IN_TYPES);
+  useEffect(() => {
+    // types of reel, including house styles trained by Editflow's editors
+    api('/styles')
+      .then((r) => r.types?.length && setTypes(r.types))
+      .catch(() => {});
+  }, []);
+  const pickType = (t) => setS((cur) => ({ ...cur, editType: t.key, editTypeLabel: t.label, targetLength: t.pacing?.targetLength || cur.targetLength, cutMode: t.pacing?.cutMode || cur.cutMode }));
   const [files, setFiles] = useState([]); // {file, kind, progress, status}
   const [busy, setBusy] = useState(false);
   const [source, setSource] = useState('upload'); // 'upload' | 'folder'
@@ -89,7 +94,7 @@ export default function NewProject() {
     try {
       const firstLocal = useFolder && picked.entries.find((e) => e.kind === 'footage')?.relPath.split('/').pop();
       const name = s.name || files.find((f) => f.kind === 'footage')?.file.name.replace(/\.[^.]+$/, '') || firstLocal?.replace(/\.[^.]+$/, '') || 'Untitled video';
-      const data = newProjectData({ ...s, platform: PLATFORMS[s.aspect] });
+      const data = newProjectData({ ...s, aspect: '9:16', platform: 'Instagram Reels / TikTok / YouTube Shorts' });
       if (useFolder) data.folders = [{ id: folder.id, name: folder.name }];
       const project = await createProject(name, null, { data });
       const pending = files.map(({ file, kind }) => ({ file, kind }));
@@ -206,15 +211,19 @@ export default function NewProject() {
         </section>
 
         <section className="card stack">
-          <div className="section-title">2 · Format</div>
-          <div className="aspect-grid">
-            {Object.entries(ASPECTS).map(([id, a]) => (
-              <button type="button" key={id} className={`choice ${s.aspect === id ? 'on' : ''}`} onClick={() => setS({ ...s, aspect: id })} aria-pressed={s.aspect === id}>
-                <div className="aspect-box" style={{ width: a.w > a.h ? 34 : (34 * a.w) / a.h, height: a.h >= a.w ? 34 : (34 * a.h) / a.w }} />
-                <b style={{ fontSize: 14 }}>{a.label}</b>
-                <span className="tiny muted">{a.hint}</span>
-              </button>
-            ))}
+          <div className="section-title">2 · Your reel</div>
+          <p className="small text-2">Every project is a vertical 9:16 reel for Instagram Reels, TikTok and YouTube Shorts.</p>
+          <div className="field">
+            <label>What kind of reel is it?</label>
+            <div className="type-grid">
+              {types.map((t) => (
+                <button type="button" key={t.key} className={`choice ${s.editType === t.key ? 'on' : ''}`} onClick={() => pickType(t)} aria-pressed={s.editType === t.key}>
+                  <b style={{ fontSize: 14 }}>{t.label}</b>
+                  <span className="tiny muted">{t.desc}</span>
+                  {t.trained && <span className="tiny" style={{ color: 'var(--ok, #6c6)' }}>House style trained by editors</span>}
+                </button>
+              ))}
+            </div>
           </div>
           <div className="field">
             <label>Approximate length</label>
@@ -224,8 +233,19 @@ export default function NewProject() {
                   {l}s
                 </button>
               ))}
-              <input className="input sm" style={{ width: 90 }} type="number" min={5} max={600} value={s.targetLength} onChange={set('targetLength')} aria-label="Custom length in seconds" />
+              <input className="input sm" style={{ width: 90 }} type="number" min={5} max={180} value={s.targetLength} onChange={set('targetLength')} aria-label="Custom length in seconds" />
             </div>
+          </div>
+          <div className="field">
+            <label>Pauses</label>
+            <div className="row wrap">
+              {Object.entries(CUT_MODES).map(([k, m]) => (
+                <button type="button" key={k} className={`chip ${s.cutMode === k ? 'on' : ''}`} style={s.cutMode === k ? { borderColor: 'var(--accent)', color: 'var(--text)' } : null} onClick={() => setS({ ...s, cutMode: k })} title={m.desc}>
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <span className="hint">{CUT_MODES[s.cutMode].desc}. Fillers, stutters, retakes and mumbling are always removed.</span>
           </div>
         </section>
 

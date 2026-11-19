@@ -9,9 +9,15 @@ import { createClient } from '@supabase/supabase-js';
 import { DEFAULT_SUPABASE_URL, DEFAULT_SUPABASE_PUBLISHABLE_KEY, MEDIA_BUCKET } from '../../shared/config.js';
 import { PROVIDERS, SUBSCRIPTION_INFO, extractJson } from '../ai/providers.js';
 import { encrypt, decrypt, mask } from '../lib/secrets.js';
-import { planPrompt, refinePrompt, referencePrompt, visualsPrompt, pickerPrompt } from '../../shared/prompts.js';
+import { planPrompt, criticPrompt, refinePrompt, referencePrompt, visualsPrompt, pickerPrompt } from '../../shared/prompts.js';
+import { cleanPlan, planToTimeline } from '../../shared/plan.js';
+import { reviewCut, scriptOf, scriptText } from '../../shared/quality.js';
+import { EDIT_TYPES, cleanStyle } from '../../shared/styles.js';
+import { exampleFromProject, trainPrompt, trainedStyle, fineTuneRecords } from '../../shared/training.js';
+import { assertAllowed, recordUsage, billingSummary, PAYMENT_PROVIDERS } from '../billing/index.js';
 import { STOCK_SOURCES, searchStock, resolveStock, pickFile, download, generateImage } from '../media/stock.js';
-import { wavInfo, wavSamples, speechChunks, wavSlice, mapLimit } from '../../shared/speech.js';
+import { wavInfo, wavSamples, speechChunks, wavSlice, mapLimit, voiceActivity } from '../../shared/speech.js';
+import { alignWords, estimateWords, segmentsFromWords, tokens } from '../../shared/words.js';
 import { cleanGraphic, fitGraphics, GRAPHIC_TYPES } from '../../shared/graphics.js';
 import { normalizeTimeline, totalDuration, layout as tlLayout, timelineCaptions, uid, BROLL_LAYOUTS } from '../../shared/timeline.js';
 import { THEMES } from '../../shared/gfx-core.js';
@@ -144,8 +150,10 @@ async function log(ctx, entry) {
 async function runJsonTask(ctx, project, task, prompt, { images = [] } = {}) {
   const eng = await activeEngine(ctx);
   if (eng.id === 'rules') throw fail(400, 'No AI provider is active. Connect ChatGPT or Claude in AI settings.', { code: 'no_provider' });
-  requireConsent(project, eng.id, eng.name, eng.def.dataUse, images.length ? 'frames' : null);
-  const base = { project_id: project.id, provider: eng.id, task };
+  // project = null: admin training on the admin's own examples (no creator project involved)
+  if (project) requireConsent(project, eng.id, eng.name, eng.def.dataUse, images.length ? 'frames' : null);
+  await assertAllowed(ctx, 'ai_task');
+  const base = { project_id: project?.id ?? null, provider: eng.id, task };
   let res;
   try {
     res = await eng.def.chat(eng.config, eng.key, { ...prompt, json: true, images });
@@ -167,11 +175,34 @@ async function runJsonTask(ctx, project, task, prompt, { images = [] } = {}) {
     }
   }
   await log(ctx, { ...base, model: res.model || eng.model, routed_via: res.routedVia, ok: true, input_tokens: res.usage?.input ?? null, output_tokens: res.usage?.output ?? null });
+  await recordUsage(ctx, 'ai_task', 1, project?.id ?? null);
   return {
     data,
     meta: { engine: 'ai', provider: eng.id, providerName: eng.name, model: res.model || eng.model, routedVia: res.routedVia, fallbackAttempts: res.fallbackAttempts || 0, usage: res.usage, at: new Date().toISOString() },
   };
 }
+
+async function requireAdmin(ctx) {
+  const { data, error } = await ctx.supabase.rpc('is_admin');
+  if (error || data !== true) throw fail(403, 'This area is for Editflow admins. Sign in with an admin account.');
+}
+
+/** The published house style for a type of reel (trained in the admin studio), or null. */
+async function styleFor(ctx, key) {
+  if (!key) return null;
+  const { data } = await ctx.supabase.from('edit_styles').select('key, label, description, rules, examples, pacing, version').eq('key', key).eq('published', true).order('version', { ascending: false }).limit(1);
+  const row = data?.[0];
+  return row ? { ...cleanStyle({ ...row, desc: row.description }), version: row.version } : null;
+}
+
+async function typeInfo(ctx, key) {
+  if (EDIT_TYPES[key]) return { key, ...EDIT_TYPES[key] };
+  const { data } = await ctx.supabase.from('edit_styles').select('key, label, description').eq('key', key).order('version', { ascending: false }).limit(1);
+  if (!data?.[0]) throw fail(404, 'Unknown type of reel.');
+  return { key, label: data[0].label, desc: data[0].description };
+}
+
+const stripSource = (ex) => ({ ...ex, data: ex.data ? { ...ex.data, source: undefined } : ex.data });
 
 const REFINE_TYPES = new Set(['trimClip', 'moveClip', 'deleteClip', 'addSegment', 'updateClip', 'setCaptionStyle', 'addOverlay', 'updateOverlay', 'deleteOverlay', 'addBroll', 'deleteBroll', 'updateBroll', 'addGraphic', 'updateGraphic', 'deleteGraphic', 'setMusic', 'setAudio']);
 
@@ -388,7 +419,145 @@ const routes = [
   ['POST', /^\/ai\/first-cut$/, async (ctx, body) => {
     const p = await loadProject(ctx, body.projectId);
     if (!p.transcript?.segments?.length) throw fail(400, 'Add a transcript first.');
-    return runJsonTask(ctx, p, 'first-cut', planPrompt(p));
+    const style = await styleFor(ctx, p.settings?.editType);
+    // Pass 1: the story editor plans the reel.
+    const first = await runJsonTask(ctx, p, 'first-cut', planPrompt(p, style));
+    // Pass 2: a senior editor watches the draft as it will play (after the clean cut, with the
+    // measured checks) and fixes it. If the review fails, the first plan is kept.
+    let data = first.data;
+    let review = null;
+    let usage = first.meta.usage || {};
+    if (body.review !== false) {
+      try {
+        const { plan } = cleanPlan(first.data, p.transcript.segments);
+        if (plan.clips.length) {
+          const draft = planToTimeline(plan, p.transcript.segments, { transcript: p.transcript, assets: p.assets, mode: p.settings?.cutMode });
+          const qa = reviewCut(p, draft);
+          const second = await runJsonTask(ctx, p, 'first-cut-review', criticPrompt(p, plan, scriptText(scriptOf(draft, p.transcript, p.assets)), qa, style));
+          const improved = second.data?.plan;
+          if (improved && cleanPlan(improved, p.transcript.segments).plan.clips.length) data = improved;
+          review = { scores: second.data?.scores || null, issues: Array.isArray(second.data?.issues) ? second.data.issues.map(String).slice(0, 8) : [], revised: data === improved };
+          usage = { input: (usage.input || 0) + (second.meta.usage?.input || 0), output: (usage.output || 0) + (second.meta.usage?.output || 0) };
+        }
+      } catch (e) {
+        if (e.status === 402) throw e;
+        review = { error: e.message.slice(0, 200) };
+      }
+    }
+    return { data: { ...data, editorReview: review }, meta: { ...first.meta, usage, passes: review && !review.error ? 2 : 1, style: style ? { key: style.key, version: style.version } : null } };
+  }],
+  ['GET', /^\/styles$/, async (ctx) => {
+    const { data } = await ctx.supabase.from('edit_styles').select('key, label, description, version, pacing, published').eq('published', true).order('version', { ascending: false }).limit(500);
+    const out = Object.fromEntries(Object.entries(EDIT_TYPES).map(([key, t]) => [key, { key, label: t.label, desc: t.desc, trained: false, version: null, pacing: null }]));
+    for (const r of data || []) if (!out[r.key]?.trained) out[r.key] = { key: r.key, label: r.label, desc: r.description || out[r.key]?.desc || '', trained: true, version: r.version, pacing: r.pacing || null };
+    return { types: Object.values(out) };
+  }],
+  ['GET', /^\/billing$/, async (ctx) => billingSummary(ctx)],
+  ['POST', /^\/billing\/checkout$/, async () => {
+    if (!Object.keys(PAYMENT_PROVIDERS).length) throw fail(501, 'Payments aren’t enabled yet. Editflow is free during the beta.', { code: 'billing_disabled' });
+    throw fail(501, 'Checkout is not implemented for this provider yet.');
+  }],
+
+  // ----- admin: training studio -----
+  ['GET', /^\/admin\/me$/, async (ctx) => {
+    await requireAdmin(ctx);
+    const { data: stats } = await ctx.supabase.rpc('admin_stats');
+    return { admin: true, email: ctx.user.email, stats: stats || null };
+  }],
+  ['POST', /^\/admin\/invites$/, async (ctx) => {
+    await requireAdmin(ctx);
+    const { data, error } = await ctx.supabase.rpc('create_admin_invite');
+    if (error) throw fail(400, error.message);
+    return { code: data, expiresInDays: 7 };
+  }],
+  ['GET', /^\/admin\/styles$/, async (ctx) => {
+    await requireAdmin(ctx);
+    const [{ data: rows }, { data: exs }] = await Promise.all([
+      ctx.supabase.from('edit_styles').select('*').order('version', { ascending: false }).limit(1000),
+      ctx.supabase.from('training_examples').select('id, edit_type').limit(5000),
+    ]);
+    const keys = new Set([...Object.keys(EDIT_TYPES), ...(rows || []).map((r) => r.key)]);
+    return {
+      types: [...keys].map((key) => {
+        const versions = (rows || []).filter((r) => r.key === key);
+        const builtIn = EDIT_TYPES[key];
+        return {
+          key,
+          label: versions[0]?.label || builtIn?.label || key,
+          desc: versions[0]?.description || builtIn?.desc || '',
+          builtIn: !!builtIn,
+          examples: (exs || []).filter((e) => e.edit_type === key).length,
+          published: versions.find((v) => v.published) || null,
+          versions,
+        };
+      }),
+    };
+  }],
+  ['POST', /^\/admin\/styles$/, async (ctx, body) => {
+    await requireAdmin(ctx);
+    const st = cleanStyle(body);
+    if (!st.key || !st.label) throw fail(400, 'A type of reel needs a key and a name.');
+    const { data: prev } = await ctx.supabase.from('edit_styles').select('version').eq('key', st.key).order('version', { ascending: false }).limit(1);
+    const row = { key: st.key, label: st.label, description: st.desc, rules: st.rules, examples: st.examples, pacing: st.pacing, published: !!body.published, version: (prev?.[0]?.version || 0) + 1, trained_from: Number(body.trainedFrom) || 0 };
+    const { data, error } = await ctx.supabase.from('edit_styles').insert(row).select().single();
+    if (error) throw fail(400, error.message);
+    return data;
+  }],
+  ['POST', /^\/admin\/styles\/([0-9a-f-]{36})\/publish$/, async (ctx, body, [id]) => {
+    await requireAdmin(ctx);
+    const { data, error } = await ctx.supabase.from('edit_styles').update({ published: !!body.published }).eq('id', id).select().single();
+    if (error) throw fail(400, error.message);
+    return data;
+  }],
+  ['GET', /^\/admin\/examples\/([a-z0-9-]{1,40})$/, async (ctx, _b, [key]) => {
+    await requireAdmin(ctx);
+    const { data, error } = await ctx.supabase.from('training_examples').select('*').eq('edit_type', key).order('created_at', { ascending: false }).limit(200);
+    if (error) throw fail(400, error.message);
+    return { examples: (data || []).map(stripSource) };
+  }],
+  ['POST', /^\/admin\/examples$/, async (ctx, body) => {
+    await requireAdmin(ctx);
+    const key = String(body.editType || '');
+    await typeInfo(ctx, key);
+    const p = await loadProject(ctx, body.projectId);
+    const { data: hist } = await ctx.supabase.from('project_history').select('timeline, source, created_at').eq('project_id', p.id).eq('source', 'ai').order('created_at', { ascending: true }).limit(1);
+    let data;
+    try {
+      data = exampleFromProject(p, { aiTimeline: hist?.[0]?.timeline || null });
+    } catch (e) {
+      throw fail(400, e.message);
+    }
+    const row = { edit_type: key, title: String(body.title || p.name || '').slice(0, 120), notes: String(body.notes || '').slice(0, 2000), rating: Math.max(1, Math.min(5, Math.round(Number(body.rating) || 5))), data, source_project_id: p.id };
+    const { data: saved, error } = await ctx.supabase.from('training_examples').insert(row).select().single();
+    if (error) throw fail(400, error.message);
+    return stripSource(saved);
+  }],
+  ['DELETE', /^\/admin\/examples\/([0-9a-f-]{36})$/, async (ctx, _b, [id]) => {
+    await requireAdmin(ctx);
+    const { error } = await ctx.supabase.from('training_examples').delete().eq('id', id);
+    if (error) throw fail(400, error.message);
+    return { ok: true };
+  }],
+  ['POST', /^\/admin\/train$/, async (ctx, body) => {
+    await requireAdmin(ctx);
+    const type = await typeInfo(ctx, String(body.key || ''));
+    const { data: exs } = await ctx.supabase.from('training_examples').select('*').eq('edit_type', type.key).order('rating', { ascending: false }).limit(12);
+    if (!exs?.length) throw fail(400, `Add at least one finished ${type.label} edit as an example first (3 or more works best).`);
+    const current = await styleFor(ctx, type.key);
+    const { data, meta } = await runJsonTask(ctx, null, 'train-style', trainPrompt(type, exs, current));
+    const st = trainedStyle(data, type);
+    if (!st.rules.length) throw fail(502, 'The AI did not return any rules. Try again or pick a more capable model.');
+    const { data: prev } = await ctx.supabase.from('edit_styles').select('version').eq('key', type.key).order('version', { ascending: false }).limit(1);
+    const row = { key: type.key, label: type.label, description: type.desc || '', rules: st.rules, examples: st.examples, pacing: st.pacing, published: false, version: (prev?.[0]?.version || 0) + 1, trained_from: exs.length };
+    const { data: saved, error } = await ctx.supabase.from('edit_styles').insert(row).select().single();
+    if (error) throw fail(400, error.message);
+    return { style: saved, summary: st.summary, meta };
+  }],
+  ['GET', /^\/admin\/dataset\/([a-z0-9-]{1,40})$/, async (ctx, _b, [key]) => {
+    await requireAdmin(ctx);
+    const { data: exs } = await ctx.supabase.from('training_examples').select('*').eq('edit_type', key).limit(1000);
+    const lines = fineTuneRecords(exs || [], planPrompt);
+    return { filename: `editflow-${key}-finetune.jsonl`, count: lines.length, jsonl: lines.join('\n') };
   }],
   ['POST', /^\/ai\/refine$/, async (ctx, body) => {
     const p = await loadProject(ctx, body.projectId);
@@ -573,6 +742,7 @@ const routes = [
     const path = String(body.path || '');
     if (!path.startsWith(`${ctx.user.id}/${p.id}/`)) throw fail(403, 'That audio file does not belong to this project.');
     const started = Date.now();
+    await assertAllowed(ctx, 'transcribe_minutes', 1);
     try {
       const { data: blob, error } = await ctx.supabase.storage.from(MEDIA_BUCKET).download(path);
       if (error || !blob) throw fail(404, 'Could not read the uploaded audio.');
@@ -583,10 +753,38 @@ const routes = [
       if (!chunks.length) return { segments: [], chunks: 0 };
       if (chunks.length > 220) throw fail(400, 'This clip is too long to transcribe in one go (about 25 minutes max). Trim it or import a caption file.');
       const language = /^[a-z]{2}$/.test(body.language || '') ? body.language : '';
-      const texts = await mapLimit(chunks, 6, (c) => def.transcribe(config, key, new Blob([wavSlice(samples, info.rate, c.start, c.end)], { type: 'audio/wav' }), { language }));
-      const segments = chunks.map((c, i) => ({ ...c, text: texts[i] })).filter((s) => s.text && !/^\W*$/.test(s.text));
+      const voice = voiceActivity(samples, info.rate);
+      const timing = { on: (config.timingModel || 'whisper-1') !== 'off', exact: 0, approx: 0 };
+      const sameModel = (config.timingModel || 'whisper-1') === (config.transcribeModel || 'gpt-transcribe');
+      const perChunk = await mapLimit(chunks, 6, async (c) => {
+        const wav = new Blob([wavSlice(samples, info.rate, c.start, c.end)], { type: 'audio/wav' });
+        const opts = { language, prompt: FILLER_PROMPT };
+        const [timed, text] = await Promise.all([
+          timing.on
+            ? def.transcribeWords(config, key, wav, opts).catch((e) => {
+                // no word timing on this account/model: fall back to timing from the audio
+                if (e.status === 404 || e.status === 400 || /model/i.test(e.message)) timing.on = false;
+                else throw e;
+                return null;
+              })
+            : null,
+          sameModel && timing.on ? null : def.transcribe(config, key, wav, opts),
+        ]);
+        const said = text ?? timed?.text ?? '';
+        const words = timed?.words?.length && tokens(said).length ? alignWords(tokens(said), timed.words) : null;
+        if (words) {
+          timing.exact++;
+          return words.map((w) => ({ t: w.t, s: r3(c.start + Math.max(0, w.s)), e: r3(c.start + Math.max(w.s, w.e)) }));
+        }
+        if (!tokens(said).length) return [];
+        timing.approx++;
+        return estimateWords(said, c.start, c.end, voice).map((w) => ({ ...w, a: 1 }));
+      });
+      const all = perChunk.flat().filter((w) => w.t && !/^\W*$/.test(w.t)).sort((x, y) => x.s - y.s);
+      const segments = segmentsFromWords(all).map((s) => ({ ...s, approx: s.words.some((w) => w.a) || undefined }));
       await log(ctx, { project_id: p.id, provider: 'openai', task: 'transcribe', model: config.transcribeModel, ok: true });
-      return { segments, chunks: chunks.length, seconds: Math.round((Date.now() - started) / 1000) };
+      await recordUsage(ctx, 'transcribe_minutes', Math.round((samples.length / info.rate / 60) * 10) / 10, p.id);
+      return { segments, voice, timing: timing.exact && !timing.approx ? 'exact' : timing.exact ? 'mixed' : 'estimated', chunks: chunks.length, seconds: Math.round((Date.now() - started) / 1000) };
     } catch (e) {
       await log(ctx, { project_id: p.id, provider: 'openai', task: 'transcribe', model: config.transcribeModel, ok: false, error: e.message.slice(0, 500) });
       throw e.status && e.status < 500 && !String(e.message).match(/^\d{3} /) ? e : fail(502, `OpenAI transcription: ${e.message}`);
@@ -596,11 +794,18 @@ const routes = [
   }],
 ];
 
+// Nudges speech-to-text to write down "um", "uh" and false starts instead of silently dropping
+// them, so the clean cut can find and remove them.
+const FILLER_PROMPT = 'Umm, so, uh, I was- I was like, hmm, you know, thinking about it. Okay so, um, here is the thing.';
+const r3 = (n) => Math.round(n * 1000) / 1000;
+
 export default async function handler(req, res) {
   try {
     const url = new URL(req.url, 'http://localhost');
     const path = url.pathname.replace(/^\/api/, '').replace(/\/+$/, '') || '/';
     if (path === '/health') return send(res, 200, { ok: true, secretConfigured: !!process.env.EDITFLOW_SECRET, supabaseUrl: SUPABASE_URL });
+    // Payment provider webhooks arrive without a user session (see server/billing/index.js).
+    if (path === '/billing/webhook') return send(res, 501, { error: 'Payments are not enabled yet.', code: 'billing_disabled' });
     const route = routes.find(([m, re]) => m === req.method && re.test(path));
     if (!route) return send(res, 404, { error: 'Not found' });
     const ctx = await authenticate(req);

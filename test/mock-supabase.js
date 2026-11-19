@@ -12,7 +12,19 @@ export function startMockSupabase(port = Number(process.env.MOCK_SUPABASE_PORT |
   const users = new Map(); // id → {id,email,password,is_anonymous}
   const tokens = new Map(); // access token → user id
   const refresh = new Map(); // refresh token → user id
-  const tables = { projects: [], project_history: [], provider_settings: [], ai_log: [] };
+  const tables = { projects: [], project_history: [], provider_settings: [], ai_log: [], usage_events: [], subscriptions: [], admins: [], admin_invites: [], edit_styles: [], training_examples: [] };
+  // Admin invite codes (supabase/migrations/0002): one test code is seeded.
+  const sha = (x) => crypto.createHash('sha256').update(String(x)).digest('hex');
+  tables.admin_invites.push({ id: crypto.randomUUID(), code_hash: sha(process.env.MOCK_ADMIN_CODE || 'TEST-ADMIN-CODE'), used_by: null, expires_at: new Date(Date.now() + 864e5).toISOString() });
+  const isAdmin = (u) => tables.admins.some((a) => a.user_id === u.id);
+  // Row-level security per table (mirrors the SQL policies). Default: own rows (user_id).
+  const POLICY = {
+    edit_styles: { read: (u, r) => r.published || isAdmin(u), write: (u) => isAdmin(u), owner: 'created_by' },
+    training_examples: { read: (u) => isAdmin(u), write: (u) => isAdmin(u), owner: 'created_by' },
+    admins: { read: (u, r) => r.user_id === u.id || isAdmin(u), write: () => false },
+    admin_invites: { read: () => false, write: () => false },
+    subscriptions: { read: (u, r) => r.user_id === u.id, write: () => false },
+  };
   const files = new Map(); // "bucket/path" → {buf, type}
   const signed = new Map(); // token → key
 
@@ -79,13 +91,41 @@ export function startMockSupabase(port = Number(process.env.MOCK_SUPABASE_PORT |
     project_history: (u) => ({ id: crypto.randomUUID(), user_id: u.id, label: '', source: 'user', created_at: new Date().toISOString() }),
     provider_settings: (u) => ({ user_id: u.id, config: {}, secret: null, updated_at: new Date().toISOString() }),
     ai_log: (u) => ({ id: Math.floor(Math.random() * 1e9), user_id: u.id, created_at: new Date().toISOString() }),
+    usage_events: (u) => ({ id: Math.floor(Math.random() * 1e9), user_id: u.id, amount: 1, created_at: new Date().toISOString() }),
+    edit_styles: (u) => ({ id: crypto.randomUUID(), created_by: u.id, version: 1, published: false, rules: [], examples: [], pacing: {}, created_at: new Date().toISOString() }),
+    training_examples: (u) => ({ id: crypto.randomUUID(), created_by: u.id, data: {}, created_at: new Date().toISOString() }),
   };
+
+  // ----- RPC (security-definer functions in the real schema) -----
+  async function rpc(req, res, fn) {
+    const u = who(req);
+    if (!u) return send(res, 401, { message: 'JWT required' });
+    const body = JSON.parse((await readRaw(req)).toString() || '{}');
+    if (fn === 'is_admin') return send(res, 200, isAdmin(u));
+    if (fn === 'claim_admin') {
+      if (u.is_anonymous) return send(res, 400, { message: 'Guest accounts cannot become admins.', code: 'P0001' });
+      const inv = tables.admin_invites.find((i) => i.code_hash === sha(String(body.code || '').trim().toUpperCase()) && !i.used_by && i.expires_at > new Date().toISOString());
+      if (!inv) return send(res, 400, { message: 'That invite code is not valid, expired or already used.', code: 'P0001' });
+      if (!isAdmin(u)) tables.admins.push({ user_id: u.id, created_at: new Date().toISOString() });
+      inv.used_by = u.id;
+      return send(res, 200, true);
+    }
+    if (!isAdmin(u)) return send(res, 403, { message: 'Admins only', code: '42501' });
+    if (fn === 'create_admin_invite') {
+      const code = crypto.randomBytes(6).toString('hex').toUpperCase().replace(/(.{4})(?=.)/g, '$1-');
+      tables.admin_invites.push({ id: crypto.randomUUID(), code_hash: sha(code), used_by: null, expires_at: new Date(Date.now() + 7 * 864e5).toISOString() });
+      return send(res, 200, code);
+    }
+    if (fn === 'admin_stats') return send(res, 200, { users: users.size, projects: tables.projects.length, exported: tables.projects.filter((p) => p.status === 'exported').length, ai_requests_30d: tables.ai_log.length, signups_7d: users.size, admins: tables.admins.length });
+    send(res, 404, { message: 'no function' });
+  }
 
   async function rest(req, res, url, table) {
     const u = who(req);
     if (!u) return send(res, 401, { message: 'JWT required' });
     if (!tables[table]) return send(res, 404, { message: 'no table' });
-    const own = tables[table].filter((r) => r.user_id === u.id); // row-level security
+    const pol = POLICY[table];
+    const own = tables[table].filter((r) => (pol ? pol.read(u, r) : r.user_id === u.id)); // row-level security
     const params = url.searchParams;
     const wantsObject = /vnd\.pgrst\.object/.test(req.headers.accept || '');
     const prefer = req.headers.prefer || '';
@@ -101,6 +141,13 @@ export function startMockSupabase(port = Number(process.env.MOCK_SUPABASE_PORT |
       const list = Array.isArray(body) ? body : [body];
       const out = [];
       for (const item of list) {
+        if (pol) {
+          if (!pol.write(u, item)) return send(res, 403, { message: 'new row violates row-level security policy' });
+          const row = { ...defaults[table](u), ...item };
+          tables[table].push(row);
+          out.push(row);
+          continue;
+        }
         if (item.user_id && item.user_id !== u.id) return send(res, 403, { message: 'new row violates row-level security policy' });
         if (table === 'project_history' && !tables.projects.some((p) => p.id === item.project_id && p.user_id === u.id)) return send(res, 403, { message: 'row-level security' });
         const conflict = params.get('on_conflict');
@@ -120,8 +167,9 @@ export function startMockSupabase(port = Number(process.env.MOCK_SUPABASE_PORT |
       return reply(out);
     }
     const hits = applyFilters(own, params);
+    if (pol && !pol.write(u, {})) return send(res, 403, { message: 'row-level security' });
     if (req.method === 'PATCH') {
-      for (const r of hits) Object.assign(r, body, { user_id: u.id, updated_at: new Date().toISOString() });
+      for (const r of hits) Object.assign(r, body, pol ? { updated_at: new Date().toISOString() } : { user_id: u.id, updated_at: new Date().toISOString() });
       return reply(hits);
     }
     if (req.method === 'DELETE') {
@@ -259,6 +307,7 @@ export function startMockSupabase(port = Number(process.env.MOCK_SUPABASE_PORT |
     const url = new URL(req.url, 'http://localhost');
     try {
       if (url.pathname.startsWith('/auth/v1')) return await auth(req, res, url);
+      if (url.pathname.startsWith('/rest/v1/rpc/')) return await rpc(req, res, url.pathname.split('/')[4]);
       if (url.pathname.startsWith('/rest/v1/')) return await rest(req, res, url, url.pathname.split('/')[3]);
       if (url.pathname.startsWith('/storage/v1/')) return await storage(req, res, url);
       send(res, 404, { message: 'not found' });

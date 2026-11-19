@@ -130,3 +130,58 @@ export async function mapLimit(items, limit, fn) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return out;
 }
+
+/**
+ * Voice activity map: where someone is actually making sound, at 10 ms resolution.
+ * Used to put every cut on the exact edge of speech and to remove ALL silence.
+ *  - adaptive to the recording: threshold sits between its noise floor and speech level
+ *  - hysteresis (on above `high`, off below `low`) so word tails aren't chopped
+ *  - gaps under `bridge` are joined, blips under `minBlip` are dropped
+ * @param samples Int16Array (scale 32768) or Float32Array (scale 1)
+ * @returns [[start, end], ...] seconds, rounded to 10 ms
+ */
+export function voiceActivity(samples, rate, { scale = samples instanceof Float32Array ? 1 : 32768, bridge = 0.05, minBlip = 0.06 } = {}) {
+  const hop = Math.max(1, Math.round(rate * 0.01));
+  const frames = Math.floor(samples.length / hop);
+  if (!frames) return [];
+  const db = new Float32Array(frames);
+  for (let f = 0; f < frames; f++) {
+    let sum = 0;
+    for (let i = f * hop, e = i + hop; i < e; i++) {
+      const v = samples[i] / scale;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / hop);
+    db[f] = rms > 1e-6 ? 20 * Math.log10(rms) : -120;
+  }
+  const sorted = Float32Array.from(db).sort();
+  const floor = sorted[Math.floor(frames * 0.1)];
+  const peak = sorted[Math.floor(frames * 0.97)];
+  const range = Math.max(0, peak - floor);
+  if (range < 6) return peak > -50 ? [[0, r2(samples.length / rate)]] : []; // constant level: all voice or all silence
+  const high = floor + Math.max(9, range * 0.38);
+  const low = floor + Math.max(6, range * 0.22);
+  const out = [];
+  let on = -1;
+  for (let f = 0; f < frames; f++) {
+    if (on < 0 && db[f] > high) {
+      // walk back to where it rose above `low` (catches soft onsets like "f", "s", "h")
+      let a = f;
+      while (a > 0 && db[a - 1] > low && f - a < 15) a--;
+      on = a;
+    } else if (on >= 0 && db[f] < low) {
+      out.push([on, f]);
+      on = -1;
+    }
+  }
+  if (on >= 0) out.push([on, frames]);
+  const fd = hop / rate;
+  const merged = [];
+  for (const [a, b] of out) {
+    const last = merged[merged.length - 1];
+    if (last && (a - last[1]) * fd < bridge) last[1] = b;
+    else merged.push([a, b]);
+  }
+  return merged.filter(([a, b]) => (b - a) * fd >= minBlip).map(([a, b]) => [r2(a * fd), r2(b * fd)]);
+}
+const r2 = (n) => Math.round(n * 100) / 100;

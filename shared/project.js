@@ -4,12 +4,15 @@ import { emptyTimeline } from './timeline.js';
 export const HISTORY_LIMIT = 50;
 
 export function newProjectData(settings = {}) {
-  const aspect = settings.aspect || '9:16';
+  const aspect = '9:16'; // Editflow makes vertical reels
   return {
     settings: {
       platform: settings.platform || 'TikTok / Reels / Shorts',
       aspect,
-      targetLength: Number(settings.targetLength) || 45,
+      targetLength: Number(settings.targetLength) || 30,
+      editType: settings.editType || 'tips',
+      editTypeLabel: settings.editTypeLabel || '',
+      cutMode: ['natural', 'tight', 'ultra'].includes(settings.cutMode) ? settings.cutMode : 'tight',
       audience: settings.audience || '',
       goal: settings.goal || '',
       tone: settings.tone || '',
@@ -33,4 +36,4 @@ export function newProjectData(settings = {}) {
   };
 }
 
-export const SETTINGS_KEYS = ['platform', 'aspect', 'targetLength', 'audience', 'goal', 'tone', 'notes', 'referenceNotes', 'referenceUrl'];
+export const SETTINGS_KEYS = ['platform', 'aspect', 'editType', 'editTypeLabel', 'cutMode', 'targetLength', 'audience', 'goal', 'tone', 'notes', 'referenceNotes', 'referenceUrl'];

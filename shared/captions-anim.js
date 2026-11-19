@@ -33,7 +33,9 @@ export function captionWords(caps, emphasis = []) {
     const emph = raw.map((w) => AUTO_EMPH.test(w));
     for (const ph of phrases)
       for (let i = 0; i + ph.length <= keys.length; i++) if (ph.every((p, j) => keys[i + j] === p)) for (let j = 0; j < ph.length; j++) emph[i + j] = true;
+    const exact = Array.isArray(c.w) && c.w.length === raw.length;
     const words = raw.map((t, i) => {
+      if (exact) return { t, start: c.w[i][0], end: c.w[i][1], emph: emph[i] };
       const s = c.start + (acc / total) * dur;
       acc += weights[i];
       return { t, start: s, end: c.start + (acc / total) * dur, emph: emph[i] };

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, XCircle, KeyRound, ExternalLink, Server, ShieldCheck, Info } from 'lucide-react';
+import { CheckCircle2, XCircle, KeyRound, ExternalLink, Server, ShieldCheck, Info, CreditCard } from 'lucide-react';
 import AppHeader from '../components/AppHeader.jsx';
 import { api } from '../lib/api.js';
 import { useAuth } from '../App.jsx';
@@ -164,6 +164,38 @@ function StockCard({ src, onChange }) {
   );
 }
 
+/** Plan and this month's usage. Payments aren't switched on yet (free beta). */
+function PlanCard() {
+  const [b, setB] = useState(null);
+  useEffect(() => {
+    api('/billing').then(setB, () => {});
+  }, []);
+  if (!b) return null;
+  return (
+    <div className="card stack">
+      <div className="spread">
+        <div className="row">
+          <CreditCard size={18} color="var(--warm)" />
+          <h3 style={{ fontSize: 19 }}>Plan &amp; usage</h3>
+        </div>
+        <span className="pill ok">{b.enabled ? b.plan.label : 'Free beta'}</span>
+      </div>
+      <p className="small text-2">{b.enabled ? `You're on the ${b.plan.label} plan.` : 'Editflow is free while in beta: nothing is limited. Paid plans come later; your usage this month is shown so you know what to expect.'}</p>
+      <div className="stat-grid">
+        {b.usage.map((u) => (
+          <div key={u.kind} className="card tight">
+            <div className="tiny muted">{u.label} this month</div>
+            <div style={{ fontSize: 20, fontWeight: 700 }}>
+              {Math.round(u.used * 10) / 10}
+              {b.enabled && u.limit != null && <span className="tiny muted"> / {u.limit}</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function Settings() {
   const [data, setData] = useState(null);
   const { refresh } = useAuth();
@@ -304,6 +336,8 @@ export default function Settings() {
           )}
           <p className="tiny muted">Token counts are as reported by the provider. Check platform.openai.com/usage and console.anthropic.com for spend and limits.</p>
         </div>
+
+        <PlanCard />
 
         <div className="card stack">
           <div className="row">

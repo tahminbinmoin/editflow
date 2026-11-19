@@ -1,6 +1,6 @@
 # Editflow (working name)
 
-Story-first video editing for solo creators and small agencies. Upload a talking-head, podcast or product clip and say who it's for. Editflow drafts an editable first cut with a hook, story structure, captions, B-roll ideas and music direction. ChatGPT or Claude can then look at the video and add B-roll and animated motion graphics. You refine it in plain language or with simple controls, then export an MP4.
+A professional short-form editor for creators: every project is a vertical 9:16 reel (Instagram Reels, TikTok, YouTube Shorts). Upload a talking-head, podcast or product clip and pick the type of reel. Editflow cuts it word by word, removing every silence, filler, stutter, abandoned take and mumble, and two AI passes (a story editor, then a senior-editor review) pick the strongest hook and the lines that earn their place. ChatGPT or Claude can then look at the video and add B-roll and animated motion graphics. You refine it in plain language or with simple controls, then export an MP4.
 
 **Live:** https://editflow-brown.vercel.app
 
@@ -122,6 +122,13 @@ Clips can be up to about 25 minutes.
 
 ## What works today
 
+- **Clean cut (word level):** speech-to-text with word timing (OpenAI `whisper-1` word timestamps merged onto the better `gpt-transcribe` text), plus a 10 ms voice-activity map of the audio. Cuts land on the real edge of the voice; fillers (um, uh, “you know,”…), stutters, abandoned takes (the last take is kept), words heard in silence and mumbling with no words are removed; every pause over the chosen limit (Natural 0.3 s, Tight 0.15 s, Ultra 0.07 s) is cut, and jump cuts alternate a gentle punch-in. Captions are rebuilt from the kept words with exact word timing. In the transcript you can cut any word, or bring back one the clean cut removed, and only that part of the edit is re-cut.
+- **Reel story edit in two passes:** the planner sees the cleaned transcript (removed words marked, spoken seconds per line) and strict reel rules (hook in the first 1–2 s, one idea, best take only, every line earns its place, length within ±15%); a second pass reviews the draft as it will actually play, scores hook / retention / clarity / payoff and returns an improved plan.
+- **Reel check:** a measured quality check (dead air, mumbling, leftover fillers, weak opener, length, repeated footage, flash frames, stretches with no visual change, caption coverage, mid-sentence ending) with a one-click fix, shown in the studio, on proposals and before export.
+- **Types of reel and house styles:** Tips, Storytime, Explainer, Hot take, Podcast clip, Product, Motivation, Day in the life (admins can add more). Each can have a house style trained by Editflow's editors that every first cut of that type follows.
+- **Admin area** at `/admin` with its own sign-in (admin accounts are created with one-time invite codes): usage stats, invite codes, and the **training studio**: add finished professional edits as examples (including what the editor changed from the AI's cut), train a house style from them with ChatGPT or Claude, review/edit, publish versions, and export chat-format JSONL for a real fine-tuning job later.
+- **Billing-ready (payments off):** plans and limits in `shared/plans.js`, usage recorded per user (`usage_events`), a `subscriptions` table only the server can write, and stub checkout/webhook routes. See “Payments later” below.
+
 - Accounts (email/password, guest demo through anonymous sign-in, upgrading a guest to a full account), private projects per user, a sample project
 - Uploads with progress straight to Supabase Storage, or working straight from a folder on the user's computer (any file size, exports saved back into the folder); in-browser reading of duration and resolution, waveforms, pause detection, thumbnails, and reference-video pacing (frame sampling)
 - Story planning (ChatGPT, Claude or rule-based) as a structured plan: hook options, beats, clip order, captions, B-roll tied to lines with reasons, music mood, sound-design notes, audio clean-up, a review checklist
@@ -139,12 +146,26 @@ Clips can be up to about 25 minutes.
 - Premiere-style timing: drag a caption's edges to stretch it (it rolls into the next caption), or set In / Out / Duration to the frame. Scrub by dragging the playhead or the ruler, and use ←/→ to step one frame (Shift for one second).
 - B-roll layouts: full screen, split screen (speaker below), photo card. Images get a slow pan.
 - Punch-in zooms per clip, and synthesised sound effects (pop, whoosh, ding, click) on graphics and B-roll.
-- Transcription with OpenAI (timed lines split at pauses), or import .srt/.vtt
+- Transcription with OpenAI (word-level timing), or import .srt/.vtt (word timing estimated from the voice map)
 - Edits stored as JSON ops with undo/redo and history (`project_history` table); AI proposals previewed before they apply
 - Manual editing: trim, split, reorder, delete, volume, transitions, caption styles and text, 4 text templates, 7 motion graphics, B-roll slots, music with ducking, loudness normalisation, noise reduction, text-based cutting
-- Export in the browser with ffmpeg.wasm: 9:16, 1:1, 4:5 or 16:9 at 540p, 720p or 1080p, with burned-in captions and titles, motion graphics, B-roll cutaways, a −14 LUFS voice and ducked music. Exports under 50 MB are also saved to the user's account.
+- Export in the browser with ffmpeg.wasm: vertical 9:16 at 540p, 720p or 1080p, with burned-in captions and titles, motion graphics, B-roll cutaways, a −14 LUFS voice and ducked music. Exports under 50 MB are also saved to the user's account.
+
+## Admins and training
+
+1. Go to `/admin/login`, choose “I have an invite code”, and create an admin account with a separate email, a 12+ character password and the invite code. The first code was created in the database; more come from the admin area (“Create invite code”, valid 7 days, single use, stored hashed).
+2. Edit reels by hand in the studio with that admin account until they're exactly right, then add them as examples of their type in the training studio.
+3. Click **Train** (uses the admin account's active ChatGPT or Claude key). Check the draft rules, edit them, then **Publish**. Every creator's first cut of that type now follows it.
+
+“Training” teaches through the prompt (rules + worked examples); it doesn't change ChatGPT's or Claude's weights. The JSONL export is ready for an OpenAI fine-tuning job if you want a fine-tuned model later.
+
+## Payments later
+
+Nothing is charged and nothing is limited today (free beta). To switch payments on: add a payment provider adapter in `server/billing/index.js` (Stripe, Paddle, Lemon Squeezy, or SSLCommerz / bKash for Bangladesh), set prices in `shared/plans.js`, make the webhook write `subscriptions` with the Supabase service-role key, then set `BILLING_ENABLED=true` on Vercel. Limits are already checked at AI tasks, transcription and export.
 
 ## Limits to know
+
+- **Accuracy:** word timing comes from OpenAI's `whisper-1` (OpenAI supports its word timestamps until 26 Feb 2027) and is refined with the audio's voice map. If word timing isn't available, timing is estimated from the audio. Always watch the reel before posting; the Reel check flags what it can measure.
 
 - **Supabase Free plan:** 50 MB per uploaded file (use a linked folder for bigger files), and projects pause after a period of inactivity. Upgrade before regular use.
 - **Browser rendering** is slower than a server: Draft takes roughly 1–3× the video length on a laptop, and it needs a desktop browser with enough memory.

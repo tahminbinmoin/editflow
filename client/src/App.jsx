@@ -10,6 +10,8 @@ import NewProject from './pages/NewProject.jsx';
 import Studio from './pages/Studio.jsx';
 import ExportPage from './pages/Export.jsx';
 import Settings from './pages/Settings.jsx';
+import AdminLogin from './pages/AdminLogin.jsx';
+import Admin, { AdminOnly } from './pages/Admin.jsx';
 
 const AuthCtx = createContext(null);
 export const useAuth = () => useContext(AuthCtx);
@@ -72,6 +74,8 @@ export default function App() {
             <Route path="/app/settings" element={<Private><Settings /></Private>} />
             <Route path="/app/p/:id" element={<Private><Studio /></Private>} />
             <Route path="/app/p/:id/export" element={<Private><ExportPage /></Private>} />
+            <Route path="/admin/login" element={<AdminLogin />} />
+            <Route path="/admin" element={<AdminOnly><Admin /></AdminOnly>} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </AuthProvider>

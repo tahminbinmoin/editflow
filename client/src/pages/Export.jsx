@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, Download, Film, CheckCircle2, AlertTriangle, Cpu } from 'lucide-react';
 import AppHeader from '../components/AppHeader.jsx';
+import QualityCard from '../components/QualityCard.jsx';
 import { useProject } from '../lib/useProject.js';
 import { renderVideo } from '../lib/render.js';
 import { uploadToStorage, signedUrls } from '../lib/media.js';
@@ -16,7 +17,6 @@ export default function ExportPage() {
   const { id } = useParams();
   const { project, urls, act } = useProject(id);
   const toast = useToast();
-  const [aspect, setAspect] = useState(null);
   const [quality, setQuality] = useState('draft');
   const [job, setJob] = useState(null); // { step, progress, eta }
   const [results, setResults] = useState({}); // exportId → blob URL (this session)
@@ -31,7 +31,7 @@ export default function ExportPage() {
 
   if (!project) return <><AppHeader /><div className="page row muted"><span className="spinner" /> Loading…</div></>;
   const tl = project.timeline;
-  const curAspect = aspect || tl.format.aspect;
+  const curAspect = '9:16'; // Editflow exports vertical reels
   const { clips, duration } = layout(tl);
   const brollMissing = tl.broll.filter((b) => !b.assetId).length;
   const size = dimensions(curAspect, quality);
@@ -101,18 +101,10 @@ export default function ExportPage() {
         </div>
         {project.isSample && <div className="notice info">This is the sample project. The export is real, but the footage is placeholder video with a synthetic “speech” tone.</div>}
 
+        <QualityCard project={project} timeline={tl} act={act} busy={null} />
+
         <section className="card stack">
-          <div className="section-title">Aspect ratio</div>
-          <div className="aspect-grid">
-            {Object.entries(ASPECTS).map(([aid, a]) => (
-              <button key={aid} className={`choice ${curAspect === aid ? 'on' : ''}`} onClick={() => setAspect(aid)} aria-pressed={curAspect === aid}>
-                <div className="aspect-box" style={{ width: a.w > a.h ? 34 : (34 * a.w) / a.h, height: a.h >= a.w ? 34 : (34 * a.h) / a.w }} />
-                <b style={{ fontSize: 14 }}>{a.label}</b>
-                <span className="tiny muted">{a.hint}</span>
-              </button>
-            ))}
-          </div>
-          {curAspect !== tl.format.aspect && <p className="tiny muted">Your edit is set to {ASPECTS[tl.format.aspect].label}. This export reframes it to {ASPECTS[curAspect].label} with a center crop.</p>}
+          {tl.format.aspect !== '9:16' && <p className="tiny muted">This older project was edited as {ASPECTS[tl.format.aspect]?.label}. The reel is exported vertical 9:16 with a center crop.</p>}
           <div className="section-title" style={{ marginTop: 8 }}>
             Quality
           </div>

@@ -1,3 +1,4 @@
+import QualityCard from './QualityCard.jsx';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Wand2, Send, Check, X, RefreshCw, Eye, EyeOff, Sparkles, ScanEye } from 'lucide-react';
@@ -81,6 +82,24 @@ function Proposal({ project, act, preview, setPreview }) {
         </details>
       )}
       {p.notes?.length > 0 && p.notes.map((n, i) => <div key={i} className="notice info">{n}</div>)}
+      {p.plan?.editorReview?.scores && (
+        <div className="card tight stack-sm" style={{ background: 'var(--panel-2)' }}>
+          <div className="tiny muted">Checked by a second AI pass (senior-editor review){p.plan.editorReview.revised ? ', which improved the cut' : ''}:</div>
+          <div className="chips">
+            {Object.entries(p.plan.editorReview.scores).map(([k, v]) => (
+              <span key={k} className="pill">
+                {k} {v}/10
+              </span>
+            ))}
+          </div>
+          {p.plan.editorReview.issues?.map((x, i) => (
+            <div key={i} className="tiny text-2">
+              • {x}
+            </div>
+          ))}
+        </div>
+      )}
+      {p.kind === 'firstCut' && <QualityCard project={project} timeline={p.timeline} act={act} readOnly compact />}
       {p.plan?.warnings?.length > 0 && <div className="tiny muted">{p.plan.warnings.join(' · ')}</div>}
       <div className="row wrap">
         <button className="btn primary sm" onClick={act.applyPending}>
@@ -365,6 +384,8 @@ export default function AIPanel({ project, engine, act, busy, status, ops, previ
           </button>
         </div>
       )}
+
+      {tl.clips.length > 0 && !project.pending && <QualityCard project={project} timeline={tl} act={act} busy={busy} />}
 
       {(plan || tl.clips.length > 0) && (
         <div className="card tight stack-sm">

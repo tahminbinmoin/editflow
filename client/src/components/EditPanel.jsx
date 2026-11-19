@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Scissors, Trash2, Type, Clapperboard, ChevronLeft, Sparkles, Search, ImagePlus, ExternalLink } from 'lucide-react';
-import { layout, timelineCaptions, formatTime, retimeCaptionOps, formatTimecode, parseTimecode, toFrames, FPS, TRANSITIONS, OVERLAY_TEMPLATES, CAPTION_STYLES, STORY_ROLES, ASPECTS, BROLL_LAYOUTS } from '@shared/timeline.js';
+import { layout, timelineCaptions, formatTime, retimeCaptionOps, formatTimecode, parseTimecode, toFrames, FPS, TRANSITIONS, OVERLAY_TEMPLATES, CAPTION_STYLES, STORY_ROLES, BROLL_LAYOUTS } from '@shared/timeline.js';
 import { GRAPHIC_TYPES, GRAPHIC_COLORS, GRAPHIC_POSITIONS, GRAPHIC_LAYOUTS } from '@shared/graphics.js';
 import { THEMES } from '@shared/gfx-core.js';
 import { useAuth } from '../App.jsx';
@@ -695,17 +695,6 @@ export default function EditPanel({ project, timeline, selection, onSelect, ops,
                 </button>
               ))}
             </div>
-          </div>
-          <div className="card tight stack-sm">
-            <div className="section-title">Format</div>
-            <select className="select sm" value={timeline.format.aspect} onChange={(e) => ops([{ type: 'setFormat', patch: { aspect: e.target.value } }], `Format → ${e.target.value}`)}>
-              {Object.entries(ASPECTS).map(([k, a]) => (
-                <option key={k} value={k}>
-                  {a.label} · {a.hint}
-                </option>
-              ))}
-            </select>
-            <p className="tiny muted">Footage is center-cropped to fill the frame.</p>
           </div>
         </div>
       </details>

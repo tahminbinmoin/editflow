@@ -90,6 +90,7 @@ export function emptyTimeline(aspect = '9:16') {
     sound: [],
     style: { theme: 'editorial', captionColor: 'yellow' },
     sfx: { enabled: true, volume: 0.5 },
+    cut: { mode: 'tight', punchIn: true },
   };
 }
 
@@ -103,6 +104,7 @@ export function normalizeTimeline(tl) {
   t.audio = { ...base.audio, ...(tl?.audio || {}) };
   t.style = { ...base.style, ...(tl?.style || {}) };
   t.sfx = { ...base.sfx, ...(tl?.sfx || {}) };
+  t.cut = { ...base.cut, ...(tl?.cut || {}) };
   t.captions.emphasis = Array.isArray(t.captions.emphasis) ? t.captions.emphasis : [];
   // Older projects: keep their static caption style unless they choose an animated one.
   if (tl?.captions && !tl.captions.style) t.captions.style = 'bold';
@@ -152,13 +154,10 @@ export function timelineCaptions(tl) {
       // Skip slivers where a caption crosses a cut, but keep short captions that sit wholly in the clip.
       const whole = s === cap.start && e === cap.end;
       if (e - s < (whole ? MIN_CAPTION - 1e-6 : 0.15)) continue;
-      out.push({
-        id: cap.id,
-        clipId: c.id,
-        start: round(c.tlStart + (s - c.in)),
-        end: round(c.tlStart + (e - c.in)),
-        text: cap.text,
-      });
+      const chip = { id: cap.id, clipId: c.id, start: round(c.tlStart + (s - c.in)), end: round(c.tlStart + (e - c.in)), text: cap.text };
+      // exact word timing (from word-level transcripts) → timeline time, for word-by-word captions
+      if (whole && Array.isArray(cap.w) && cap.w.length) chip.w = cap.w.map(([a, b]) => [round(c.tlStart + (a - c.in)), round(c.tlStart + (b - c.in))]);
+      out.push(chip);
     }
   }
   return out.sort((a, b) => a.start - b.start);
@@ -224,6 +223,19 @@ export function retimeCaptionOps(tl, captionId, edit, chipIndex = 0) {
   ];
 }
 
+/**
+ * Clips made by the clean cut belong to a group that can be re-cut from its words. A manual
+ * trim, move, split or delete is the creator's call, so the group becomes plain clips again
+ * (a re-cut then only cleans inside each clip's own in/out).
+ */
+function detachGroup(tl, grp) {
+  if (!grp) return;
+  for (const c of tl.clips) if (c.grp === grp) {
+    delete c.grp;
+    delete c.span;
+  }
+}
+
 function findIndex(list, id, what) {
   const i = list.findIndex((x) => x.id === id);
   if (i < 0) throw new Error(`${what} "${id}" was not found`);
@@ -248,6 +260,7 @@ export function applyOp(tlIn, op, ctx = {}) {
     case 'trimClip': {
       const i = findIndex(tl.clips, op.clipId, 'Clip');
       const c = tl.clips[i];
+      detachGroup(tl, c.grp);
       if (typeof op.in === 'number') c.in = op.in;
       if (typeof op.out === 'number') c.out = op.out;
       clampClip(c, ctx);
@@ -255,6 +268,7 @@ export function applyOp(tlIn, op, ctx = {}) {
     }
     case 'moveClip': {
       const i = findIndex(tl.clips, op.clipId, 'Clip');
+      detachGroup(tl, tl.clips[i].grp);
       const [c] = tl.clips.splice(i, 1);
       const to = Math.max(0, Math.min(tl.clips.length, Math.round(op.toIndex)));
       tl.clips.splice(to, 0, c);
@@ -264,6 +278,7 @@ export function applyOp(tlIn, op, ctx = {}) {
       const loc = locate(tl, op.at);
       if (!loc) throw new Error('Move the playhead over a clip to split it');
       const c = tl.clips[loc.index];
+      detachGroup(tl, c.grp);
       const at = round(loc.sourceTime);
       if (at - c.in < 0.1 || c.out - at < 0.1) throw new Error('Too close to the clip edge to split');
       const second = { ...clone(c), id: op.newId || uid('clip'), in: at, transitionIn: 'cut' };
@@ -273,6 +288,7 @@ export function applyOp(tlIn, op, ctx = {}) {
     }
     case 'deleteClip': {
       const i = findIndex(tl.clips, op.clipId, 'Clip');
+      detachGroup(tl, tl.clips[i].grp);
       tl.clips.splice(i, 1);
       break;
     }
@@ -328,6 +344,7 @@ export function applyOp(tlIn, op, ctx = {}) {
       if ('start' in patch) patch.start = round(Math.max(0, s));
       if ('end' in patch) patch.end = round(e);
       Object.assign(cap, patch);
+      if ('text' in patch || 'start' in patch || 'end' in patch) delete cap.w; // word timing no longer matches
       tl.captions.items.sort((a, b) => a.start - b.start);
       break;
     }

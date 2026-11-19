@@ -62,12 +62,13 @@ export const PROVIDERS = {
     dataUse: 'OpenAI states that API data is not used to train its models by default. Review your organisation’s data controls at platform.openai.com.',
     fields: [
       { key: 'model', label: 'Model', placeholder: 'gpt-6.2-sol', help: 'Used for planning and video analysis. Must accept images for video analysis (current GPT models do).' },
-      { key: 'transcribeModel', label: 'Transcription model', placeholder: 'gpt-transcribe', help: 'Speech-to-text model for the Transcript tab.' },
+      { key: 'transcribeModel', label: 'Transcription model', placeholder: 'gpt-transcribe', help: 'Speech-to-text model for the words themselves.' },
+      { key: 'timingModel', label: 'Word timing model', placeholder: 'whisper-1', help: 'Gives each word its exact time, so cuts land between words and silences, fillers and mumbles can be removed. OpenAI only offers word timing on whisper-1 (supported until 26 Feb 2027). Type “off” to estimate timing from the audio instead.' },
       { key: 'imageModel', label: 'Image model', placeholder: 'gpt-image-2', help: 'Makes AI B-roll images when stock footage doesn’t fit.' },
     ],
     secretLabel: 'OpenAI API key (sk-…)',
     vision: true,
-    defaults: () => ({ model: 'gpt-6.2-sol', transcribeModel: 'gpt-transcribe', imageModel: 'gpt-image-2' }),
+    defaults: () => ({ model: 'gpt-6.2-sol', transcribeModel: 'gpt-transcribe', timingModel: 'whisper-1', imageModel: 'gpt-image-2' }),
     async test(cfg, key) {
       const { json } = await http(`${OPENAI()}/models`, { headers: { authorization: `Bearer ${key}` }, timeout: 15000 });
       const ids = (json?.data || []).map((m) => m.id);
@@ -108,6 +109,19 @@ export const PROVIDERS = {
       if (prompt) form.append('prompt', prompt.slice(-400));
       const { json } = await http(`${OPENAI()}/audio/transcriptions`, { method: 'POST', headers: { authorization: `Bearer ${key}` }, body: form, timeout: 120_000 });
       return String(json?.text || '').trim();
+    },
+    /** Speech to text WITH word times for one chunk (whisper-1 verbose_json). Returns { text, words: [{ t, s, e }] }. */
+    async transcribeWords(cfg, key, audio, { prompt = '', language = '' } = {}) {
+      const form = new FormData();
+      form.append('file', audio, 'speech.wav');
+      form.append('model', cfg.timingModel || 'whisper-1');
+      form.append('response_format', 'verbose_json');
+      form.append('timestamp_granularities[]', 'word');
+      if (language) form.append('language', language);
+      if (prompt) form.append('prompt', prompt.slice(-400));
+      const { json } = await http(`${OPENAI()}/audio/transcriptions`, { method: 'POST', headers: { authorization: `Bearer ${key}` }, body: form, timeout: 120_000 });
+      const words = (json?.words || []).filter((w) => w && Number.isFinite(+w.start) && Number.isFinite(+w.end)).map((w) => ({ t: String(w.word || '').trim(), s: +w.start, e: +w.end })).filter((w) => w.t);
+      return { text: String(json?.text || '').trim(), words };
     },
   },
 

@@ -110,6 +110,13 @@ test('AI planning needs consent, then returns a plan; refine accepts graphic ops
   assert.equal(cut.status, 200);
   assert.equal(cut.data.meta.routedVia, 'openai/gpt-6.2-sol');
   assert.ok(Array.isArray(cut.data.data.clips));
+  // two passes: the planner, then a senior-editor review that returns the improved plan
+  assert.equal(cut.data.meta.passes, 2);
+  assert.equal(cut.data.data.summary, 'Mock revised plan.');
+  assert.deepEqual(cut.data.data.editorReview.scores, { hook: 6, retention: 7, clarity: 8, payoff: 6 });
+  assert.equal(cut.data.data.editorReview.revised, true);
+  const reviewCall = sb.state.tables.ai_log.filter((l) => l.task === 'first-cut-review');
+  assert.equal(reviewCall.length, 1);
   const ref = await call('/ai/refine', { method: 'POST', body: { projectId: project.id, request: 'music quieter' } });
   assert.ok(ref.data.ops.some((o) => o.type === 'setMusic'));
   assert.ok(ref.data.ops.some((o) => o.type === 'addGraphic'));
@@ -247,7 +254,101 @@ test('OpenAI transcription: consent, own folder only, split at pauses into timed
   assert.ok(Math.abs(r.data.segments[0].start - 0.5) < 0.2 && Math.abs(r.data.segments[0].end - 2) < 0.2, JSON.stringify(r.data.segments));
   assert.ok(Math.abs(r.data.segments[1].start - 3) < 0.2 && Math.abs(r.data.segments[1].end - 5.5) < 0.2, JSON.stringify(r.data.segments));
   assert.match(r.data.segments[0].text, /^Mock line/);
-  assert.ok(aiState.requests.filter((q) => q.kind === 'transcribe').every((q) => q.model === 'gpt-transcribe'));
+  // text from the transcription model, word times from the word-timing model, merged per word
+  const models = aiState.requests.filter((q) => q.kind === 'transcribe').map((q) => q.model);
+  assert.ok(models.includes('gpt-transcribe') && models.includes('whisper-1'), models.join());
+  assert.equal(r.data.timing, 'exact');
+  const w = r.data.segments[0].words;
+  assert.equal(w.length, 3);
+  assert.ok(w.every((x, i) => x.e >= x.s && (i === 0 || x.s >= w[i - 1].s)), JSON.stringify(w));
+  assert.ok(w[0].s >= 0.3 && w[2].e <= 2.2, 'word times are in file time, inside the spoken part');
+  assert.ok(Array.isArray(r.data.voice) && r.data.voice.length === 2, JSON.stringify(r.data.voice));
+  assert.ok(Math.abs(r.data.voice[0][0] - 0.5) < 0.05 && Math.abs(r.data.voice[1][1] - 5.5) < 0.05, 'voice map edges are within 50 ms');
   const gone = await fetch(`http://localhost:${SB}/storage/v1/object/media/${path}`, { headers: { authorization: `Bearer ${token}`, apikey: 'test-key' } });
   assert.equal(gone.status, 404, 'audio is deleted after transcription');
+});
+
+test('admin area: invite code makes an admin; non-admins are refused', async () => {
+  const no = await call('/admin/me');
+  assert.equal(no.status, 403, 'a normal account is not an admin');
+  const denied = await call('/admin/styles', { method: 'POST', body: { key: 'x', label: 'X' } });
+  assert.equal(denied.status, 403);
+  // a normal user can't write house styles straight to the table either (row-level security)
+  const direct = await fetch(`http://localhost:${SB}/rest/v1/edit_styles`, { method: 'POST', headers: { authorization: `Bearer ${token}`, apikey: 'test-key', 'content-type': 'application/json' }, body: JSON.stringify({ key: 'x', label: 'X', published: true }) });
+  assert.equal(direct.status, 403);
+  // separate admin account, created with the one-time invite code
+  const adm = await fetch(`http://localhost:${SB}/auth/v1/signup`, { method: 'POST', body: JSON.stringify({ email: 'admin@test.local', password: 'password1' }) }).then((r) => r.json());
+  const rpc = (fn, body, tk) => fetch(`http://localhost:${SB}/rest/v1/rpc/${fn}`, { method: 'POST', headers: { authorization: `Bearer ${tk}`, apikey: 'test-key', 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+  assert.equal((await rpc('claim_admin', { code: 'WRONG' }, adm.access_token)).status, 400);
+  assert.equal((await rpc('claim_admin', { code: 'test-admin-code' }, adm.access_token)).status, 200);
+  assert.equal((await rpc('claim_admin', { code: 'TEST-ADMIN-CODE' }, token)).status, 400, 'codes are single-use');
+  const asAdmin = (path, init = {}) => fetch(`http://localhost:${APIP}/api${path}`, { method: init.method || 'GET', headers: { authorization: `Bearer ${adm.access_token}`, ...(init.body ? { 'content-type': 'application/json' } : {}) }, body: init.body ? JSON.stringify(init.body) : undefined }).then(async (r) => ({ status: r.status, data: await r.json() }));
+  const me = await asAdmin('/admin/me');
+  assert.equal(me.status, 200);
+  assert.equal(me.data.admin, true);
+  assert.ok(me.data.stats.users >= 2);
+  const inv = await asAdmin('/admin/invites', { method: 'POST' });
+  assert.match(inv.data.code, /^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/);
+  globalThis.__admin = { token: adm.access_token, asAdmin };
+});
+
+test('training studio: example from a finished edit, AI-distilled house style, publish, used by the story edit', async () => {
+  const { asAdmin, token: at } = globalThis.__admin;
+  // the admin's own finished edit
+  const segments = [
+    { id: 's1', assetId: 'a1', start: 0, end: 2, text: 'So, um, hi everyone.', words: [{ t: 'So,', s: 0.1, e: 0.3 }, { t: 'um,', s: 0.5, e: 0.8 }, { t: 'hi', s: 1, e: 1.2 }, { t: 'everyone.', s: 1.3, e: 1.9 }] },
+    { id: 's2', assetId: 'a1', start: 3, end: 5, text: 'Brew at 92 degrees.', words: [{ t: 'Brew', s: 3, e: 3.3 }, { t: 'at', s: 3.35, e: 3.5 }, { t: '92', s: 3.55, e: 4 }, { t: 'degrees.', s: 4.05, e: 4.8 }] },
+  ];
+  const data = { settings: { targetLength: 30 }, assets: [{ id: 'a1', kind: 'footage', duration: 6, status: 'ready' }], transcript: { segments }, timeline: { clips: [{ id: 'c1', assetId: 'a1', in: 2.95, out: 4.9 }] }, consent: {}, history: { entries: [], index: -1 } };
+  const [proj] = await fetch(`http://localhost:${SB}/rest/v1/projects?select=*`, { method: 'POST', headers: { authorization: `Bearer ${at}`, apikey: 'test-key', 'content-type': 'application/json', prefer: 'return=representation' }, body: JSON.stringify({ name: 'Gold edit', data }) }).then((r) => r.json());
+  const ex = await asAdmin('/admin/examples', { method: 'POST', body: { projectId: proj.id, editType: 'tips', notes: 'Opens on the number', rating: 5 } });
+  assert.equal(ex.status, 200, JSON.stringify(ex.data));
+  assert.deepEqual(ex.data.data.lines.map((l) => [l.id, l.kept]), [['s1', false], ['s2', true]]);
+  assert.equal(ex.data.data.hook.id, 's2');
+  assert.match(ex.data.data.lines[0].text, /⟨So, um,⟩/, 'fillers are marked');
+  assert.equal(ex.data.data.source, undefined, 'raw source is not sent back');
+  const list = await asAdmin('/admin/examples/tips');
+  assert.equal(list.data.examples.length, 1);
+  // train → a draft version (not live until published)
+  await fetch(`http://localhost:${APIP}/api/settings/ai/openai`, { method: 'PUT', headers: { authorization: `Bearer ${at}`, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'sk-test', config: { model: 'gpt-6.2-sol' } }) });
+  await fetch(`http://localhost:${APIP}/api/settings/ai-active`, { method: 'PUT', headers: { authorization: `Bearer ${at}`, 'content-type': 'application/json' }, body: JSON.stringify({ active: 'openai' }) });
+  const tr = await asAdmin('/admin/train', { method: 'POST', body: { key: 'tips' } });
+  assert.equal(tr.status, 200, JSON.stringify(tr.data));
+  assert.equal(tr.data.style.published, false);
+  assert.equal(tr.data.style.trained_from, 1);
+  assert.ok(tr.data.style.rules.includes('Open on the result, never the setup'));
+  assert.equal((await call('/styles')).data.types.find((t) => t.key === 'tips').trained, false, 'drafts are not used');
+  const pub = await asAdmin(`/admin/styles/${tr.data.style.id}/publish`, { method: 'POST', body: { published: true } });
+  assert.equal(pub.data.published, true);
+  const types = await call('/styles');
+  assert.equal(types.data.types.find((t) => t.key === 'tips').trained, true);
+  // the creator's story edit now carries the house style
+  const [p] = await rest(`projects?id=eq.${project.id}&select=*`);
+  await rest(`projects?id=eq.${project.id}`, { method: 'PATCH', body: JSON.stringify({ data: { ...p.data, settings: { ...p.data.settings, editType: 'tips' } } }) });
+  await call('/settings/ai-active', { method: 'PUT', body: { active: 'openai' } });
+  await allow('openai');
+  aiState.requests.length = 0;
+  const cut = await call('/ai/first-cut', { method: 'POST', body: { projectId: project.id, review: false } });
+  assert.equal(cut.status, 200, JSON.stringify(cut.data));
+  assert.equal(cut.data.meta.style.key, 'tips');
+  const sent = aiState.requests.find((q) => q.kind === 'chat');
+  assert.ok(sent && /HOUSE STYLE for "Tips & how-to"/.test(sent.system || ''), 'house style is in the prompt');
+  // fine-tuning export
+  const ds = await asAdmin('/admin/dataset/tips');
+  assert.equal(ds.data.count, 1);
+  const rec = JSON.parse(ds.data.jsonl.split('\n')[0]);
+  assert.deepEqual(rec.messages.map((m) => m.role), ['system', 'user', 'assistant']);
+  assert.deepEqual(JSON.parse(rec.messages[2].content).clips.map((c) => c.segmentIds[0]), ['s2']);
+});
+
+test('billing is ready but off: free beta, usage recorded, checkout and webhook not enabled', async () => {
+  const b = await call('/billing');
+  assert.equal(b.status, 200);
+  assert.equal(b.data.enabled, false);
+  assert.equal(b.data.plan.id, 'free');
+  assert.ok(b.data.usage.find((u) => u.kind === 'ai_task').used >= 1, 'AI tasks are counted');
+  assert.ok(b.data.usage.find((u) => u.kind === 'transcribe_minutes').used > 0);
+  assert.equal((await call('/billing/checkout', { method: 'POST', body: { plan: 'creator' } })).status, 501);
+  const wh = await fetch(`http://localhost:${APIP}/api/billing/webhook`, { method: 'POST', body: '{}' });
+  assert.equal(wh.status, 501);
 });

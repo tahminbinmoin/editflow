@@ -57,6 +57,8 @@ export async function decodeAudio(file) {
   }
 }
 
+import { voiceActivity } from '@shared/speech.js';
+
 const mono = (buf) => {
   if (buf.numberOfChannels === 1) return buf.getChannelData(0);
   const a = buf.getChannelData(0);
@@ -65,6 +67,11 @@ const mono = (buf) => {
   for (let i = 0; i < a.length; i++) m[i] = (a[i] + b[i]) / 2;
   return m;
 };
+
+/** Voice activity map ([[start, end], …] where there is sound), for frame-tight, silence-free cuts. */
+export function voiceFrom(buf) {
+  return voiceActivity(mono(buf), buf.sampleRate);
+}
 
 /** Waveform peaks 0–100 at `perSecond` resolution. */
 export function peaksFrom(buf, perSecond = 20) {

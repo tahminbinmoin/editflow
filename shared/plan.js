@@ -4,6 +4,7 @@
 // invented times. This module validates a plan and turns it into timeline data.
 
 import { emptyTimeline, uid, layout, STORY_ROLES, OVERLAY_TEMPLATES } from './timeline.js';
+import { cutLines, wordIndex, DEFAULT_CUT, CUT_MODES } from './cleancut.js';
 
 const round = (n) => Math.round(n * 1000) / 1000;
 
@@ -41,8 +42,8 @@ export function cleanPlan(raw, segments) {
         segmentIds: segList(c.segmentIds || [], 'clip order'),
         role: role(c.role),
         note: str(c.note, 200),
-        trimStart: Math.max(0, Math.min(5, Number(c.trimStart) || 0)),
-        trimEnd: Math.max(0, Math.min(5, Number(c.trimEnd) || 0)),
+        trimStartWords: Math.max(0, Math.min(12, Math.round(Number(c.trimStartWords) || 0))),
+        trimEndWords: Math.max(0, Math.min(12, Math.round(Number(c.trimEndWords) || 0))),
       }))
       .filter((c) => c.segmentIds.length),
     captions: (raw?.captions || [])
@@ -95,8 +96,14 @@ export function chunkCaption(text, start, end, maxWords = 5) {
   });
 }
 
-/** Build a timeline from a cleaned plan. Keeps the music file and format from `previous` if present. */
-export function planToTimeline(plan, segments, { aspect = '9:16', previous = null } = {}) {
+/**
+ * Build a timeline from a cleaned plan. Keeps the music file and look from `previous` if present.
+ * The lines the plan chose are cut by the clean-cut engine (cleancut.js): no silence, no fillers,
+ * stutters, retakes or mumbling, cuts on the real edges of the voice, captions word by word.
+ * Pass `transcript` + `assets` (with voice maps) for the exact cut; with only `segments` the
+ * word timing is estimated.
+ */
+export function planToTimeline(plan, segments, { aspect = '9:16', previous = null, transcript = null, assets = [], mode = DEFAULT_CUT, punchIn = true } = {}) {
   const seg = Object.fromEntries(segments.map((s) => [s.id, s]));
   const tl = emptyTimeline(aspect);
   if (previous) {
@@ -106,48 +113,19 @@ export function planToTimeline(plan, segments, { aspect = '9:16', previous = nul
     if (previous.style) tl.style = { ...tl.style, ...previous.style };
     if (previous.sfx) tl.sfx = { ...tl.sfx, ...previous.sfx };
   }
-
-  // Clips: merge runs of adjacent segments from the same asset into one clip.
+  tl.cut = { mode: CUT_MODES[mode] ? mode : DEFAULT_CUT, punchIn };
+  const idx = wordIndex(transcript || { segments }, assets);
   const segToClip = {};
   for (const c of plan.clips) {
-    const runs = [];
-    for (const id of c.segmentIds) {
-      const s = seg[id];
-      const last = runs[runs.length - 1];
-      if (last && last.assetId === s.assetId && Math.abs(s.start - last.end) < 0.6) {
-        last.end = s.end;
-        last.ids.push(id);
-      } else runs.push({ assetId: s.assetId, start: s.start, end: s.end, ids: [id] });
+    const out = cutLines(c.segmentIds, idx, seg, { mode: tl.cut.mode, trimStartWords: c.trimStartWords, trimEndWords: c.trimEndWords, role: c.role, note: c.note, punchIn });
+    for (const clip of out.clips) {
+      for (const sid of clip.segs) segToClip[sid] ||= clip.id;
+      delete clip.segs;
+      tl.clips.push(clip);
     }
-    runs.forEach((r, i) => {
-      const id = uid('clip');
-      const first = i === 0;
-      const lastRun = i === runs.length - 1;
-      const inPt = Math.max(0, r.start - 0.08 + (first ? c.trimStart : 0));
-      const outPt = r.end + 0.12 - (lastRun ? c.trimEnd : 0);
-      tl.clips.push({
-        id,
-        assetId: r.assetId,
-        in: round(inPt),
-        out: round(Math.max(inPt + 0.3, outPt)),
-        volume: 1,
-        transitionIn: 'cut',
-        role: c.role,
-        note: c.note,
-      });
-      r.ids.forEach((sid) => (segToClip[sid] = id));
-    });
+    tl.captions.items.push(...out.captions);
   }
-
-  // Captions (source time) for every segment used in the cut.
-  const capText = Object.fromEntries(plan.captions.map((c) => [c.segmentId, c.text]));
-  const used = new Set(Object.keys(segToClip));
-  for (const s of segments) {
-    if (!used.has(s.id)) continue;
-    for (const ch of chunkCaption(capText[s.id] || s.text, s.start, s.end)) {
-      tl.captions.items.push({ id: uid('cap'), assetId: s.assetId, ...ch });
-    }
-  }
+  tl.captions.items.sort((a, b) => a.start - b.start);
 
   const { clips } = layout(tl);
   const tlTimeOf = (segmentId) => {

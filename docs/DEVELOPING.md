@@ -25,12 +25,13 @@ client/                    React app (Vite root)
                            'editflow-local'), <input webkitdirectory> fallback, listing, reading, saving exports
   src/lib/sample.js        builds the sample project from client/public/sample
   src/components/          Player, Timeline, panels (Story, Transcript, Media, AI, Edit)
-  src/pages/               Landing, Auth, Dashboard, NewProject, Studio, Export, Settings
+  src/pages/               Landing, Auth, Dashboard, NewProject, Studio, Export, Settings, AdminLogin, Admin (training studio)
   public/sample/           sample media (committed); public/ffmpeg + public/fonts are copied at build
 api/index.js               Vercel function entry → server/api/handler.js
 server/api/handler.js      routes: /engine, /settings/ai*, /settings/prefs, /ai/first-cut, /ai/refine, /ai/reference,
                            /ai/visuals (plan + stock search + picker), /broll/search, /broll/fetch, /broll/generate,
-                           /transcribe/openai
+                           /transcribe/openai (words + voice map), /styles, /billing*, /admin/* (training studio)
+server/billing/index.js    plans, usage, limit checks (off unless BILLING_ENABLED=true); payment adapters go here
 server/ai/providers.js     ChatGPT (OpenAI) + Claude (Anthropic) adapters: chat with images (base64 or URL), OpenAI transcription
 server/media/stock.js      Pexels + Pixabay search/resolve/download (host allowlist), OpenAI image generation
 server/lib/secrets.js      AES-256-GCM with EDITFLOW_SECRET
@@ -43,7 +44,13 @@ shared/                    pure modules used by browser, API and tests
   layer.js                 the canvas layer (graphics + photo-card B-roll + captions), speaker push-down
                            windows (panels, split B-roll), sound-effect events
   sfx.js                   synthesised sound effects (Web Audio; live in preview, OfflineAudioContext in export)
-  speech.js                WAV parsing, speech chunking at pauses (transcription timing)
+  speech.js                WAV parsing, speech chunking, voiceActivity (10 ms voice map)
+  words.js                 word timing (estimate, align), disfluency flags (filler/stutter/retake/noise), lines from words
+  cleancut.js              the clean cut: keep-ranges on voice edges, pause/mumble removal, word-timed captions,
+                           cut groups (grp/span) so single words can be restored/cut and re-cut locally
+  quality.js               the Reel check (measured) + the cut as it plays (scriptOf)
+  styles.js                types of reel + house-style cleaning   training.js  examples, train prompt, JSONL
+  plans.js                 plans + limits (billing-ready)
   render-graph.js          export as ffmpeg commands    transcript.js  SRT/VTT/text parsing
   project.js               project document     probe.js      ffmpeg log parser     config.js
 supabase/migrations/       schema, RLS policies, storage bucket
@@ -51,6 +58,17 @@ test/                      unit, API and render tests + mock-supabase.js, mock-a
 ```
 
 **The one idea to keep:** the edit is data. `project.timeline` is JSON; every change is an op applied by `shared/timeline.js`; every committed change is a row in `project_history`. The preview (`Player.jsx`) and the export (`render-graph.js`) read the same timeline.
+
+### Clean cut (`shared/words.js`, `shared/cleancut.js`)
+
+- Transcript lines carry `words: [{ t, s, e, a?, k?, c? }]` (source seconds; `a` = estimated, `k` = kept by the user, `c` = cut by the user). Flags (filler/stutter/retake/noise) are never stored: `assetWords()` recomputes them, so detector improvements reach old projects.
+- `asset.voice` is the voice map (`[[start, end], …]`, 10 ms) from `voiceActivity()` (computed at upload, transcription, or lazily by `ensureVoice`).
+- `planToTimeline()` → `cutLines()` → `cutRanges()`: one clip per kept range; every clip of one story clip shares `grp` and `span` (the words it covers). `cleanTimeline(tl, transcript, assets, { mode, only })` re-derives groups from their words (used by “Re-clean”, word toggles, and clips added by hand or by the AI). A manual trim/move/split/delete detaches the group (`detachGroup` in `timeline.js`), so re-cleaning then stays inside that clip's own in/out.
+- Captions made by the clean cut have `w: [[s, e], …]` per word (source time); `timelineCaptions` maps them to timeline time and `captionWords` uses them for word-by-word animation. Editing a caption's text or time drops `w`.
+
+### Story edit and training
+
+`/ai/first-cut` runs `planPrompt` (with the published house style for `settings.editType`, from `edit_styles`), builds the draft with `planToTimeline`, measures it with `reviewCut`, then runs `criticPrompt` with the draft as it plays. The improved plan is returned with `editorReview`. Admin training: `exampleFromProject` → `training_examples`; `/admin/train` → `trainPrompt` → a new unpublished `edit_styles` version; publish to make it live.
 
 ### Data model (Supabase)
 
@@ -60,6 +78,11 @@ test/                      unit, API and render tests + mock-supabase.js, mock-a
 | `project_history` | timeline snapshots for undo/history | owner only |
 | `provider_settings` | per-user AI config + encrypted key (`secret`) | owner only; the API decrypts |
 | `ai_log` | AI request log (provider, routed model, tokens, errors) | owner only |
+| `admins`, `admin_invites` | admin accounts; hashed one-time invite codes (`claim_admin`, `create_admin_invite`, `is_admin`, `admin_stats` functions) | functions only |
+| `edit_styles` | house style per type of reel, versioned (`rules`, `examples`, `pacing`, `published`) | everyone reads published; admins write |
+| `training_examples` | professional edits used for training (`data` from `exampleFromProject`) | admins only |
+| `subscriptions` | plan per paying user (written by the payment webhook with the service role) | owner reads; nobody writes from the browser |
+| `usage_events` | exports, AI tasks, transcription minutes | owner reads/inserts |
 | storage `media` | `<user id>/<project id>/<asset id>/original.*, thumb.jpg, peaks.json`, `…/exports/*.mp4` | owner folder only |
 
 Assets read from a linked folder have `source: 'local', folderId, relPath, lastModified` and no `original.*` in storage (only `thumb.jpg` and `peaks.json`). `projects.data.folders[]` lists `{id, name}`; the handle itself lives only in that browser's IndexedDB, so another device sees the folder as "not connected here". `media.assetUrls` / `assetBlob` resolve local assets to object URLs / `File`s; anything that reads media should go through them.
@@ -157,15 +180,13 @@ Component in `client/src/pages/`, route in `client/src/App.jsx` (wrap in `<Priva
 | Rendering | ffmpeg.wasm in the browser | add a server render worker for long or high-res exports |
 | AI | users' own OpenAI/Anthropic API keys | your own keys server-side with metering per plan, or OpenAI "Sign in with ChatGPT" partner access |
 | Auth emails | Supabase built-in sender | custom SMTP, CAPTCHA |
-| Billing | none | Stripe + plan limits |
+| Billing | plans, usage and limit checks ready, payments off | payment adapter in `server/billing`, prices, `BILLING_ENABLED=true` |
 
 ## Feature backlog (where each would go)
 | Feature | Main files |
 |---|---|
-| Word-level karaoke captions | word timings (forced alignment on the speech chunks); caption items per word; ASS `\k` tags in `buildAss` |
 | Clip speed / punch-in zoom | ops in `timeline.js`; filters in the segment command in `render-graph.js` |
 | Face-aware reframing | face boxes from a vision step; crop focus per clip used in `fit` |
 | Multi-track timeline | generalise `broll` into `tracks[]`; overlay chain in the final command; track rows in `Timeline.jsx` |
 | Brand kits | `brands` table; inject fonts/colours into ASS styles + preview CSS |
 | Team review links | share-token table + read-only Studio view + timestamped comments |
-| Silence-removal slider | `asset.silences` → batch of trim ops |
